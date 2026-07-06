@@ -1,0 +1,1683 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guillotina — Procesador de PDF</title>
+<meta name="description" content="Recorta, redimensiona a A4, elimina, reordena y une PDFs. Todo se procesa en tu navegador.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f5b301'/%3E%3Cpath d='M7 22 25 8' stroke='%231f2428' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   GUILLOTINA · Procesador de PDF · v2
+   Diseño: banco de corte de imprenta — chapa de acero clara,
+   tapete de corte verde, cuchillas amarillas de seguridad.
+   ============================================================ */
+:root{
+  --bench:#e9ecea;
+  --panel:#f8f9f8;
+  --ink:#1f2428;
+  --muted:#5d6871;
+  --line:#cfd6d3;
+  --mat:#41544b;
+  --mat-grid:#4c6158;
+  --blade:#f5b301;
+  --blade-edge:#8a6a00;
+  --danger:#c4442a;
+  --ok:#2e8b6a;
+  --radius:10px;
+  --shadow:0 1px 2px rgba(31,36,40,.08), 0 8px 24px rgba(31,36,40,.10);
+  --font-ui:'Sora','Segoe UI',system-ui,-apple-system,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'Cascadia Mono',Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:var(--font-ui);
+  font-size:14px;
+  color:var(--ink);
+  background:var(--bench);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+button{font-family:inherit;font-size:13px;cursor:pointer}
+input,select{font-family:inherit;font-size:13px;color:var(--ink)}
+:focus-visible{outline:2px solid var(--blade);outline-offset:2px}
+body.resizing{user-select:none;-webkit-user-select:none}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important}
+}
+
+/* ---------- Barra superior ---------- */
+.topbar{
+  flex:0 0 auto;
+  display:flex;align-items:center;gap:12px;
+  padding:10px 16px;
+  background:var(--panel);
+  border-bottom:1px solid var(--line);
+}
+.plate{
+  display:flex;align-items:baseline;gap:10px;
+  padding:6px 12px;
+  border:1px solid var(--ink);
+  border-radius:6px;
+  background:linear-gradient(180deg,#fdfdfc,#eef0ee);
+  box-shadow:inset 0 1px 0 #fff;
+}
+.plate h1{margin:0;font-size:15px;font-weight:700;letter-spacing:.06em}
+.plate small{font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.08em}
+.topbar .spacer{flex:1}
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:8px 14px;border-radius:8px;
+  border:1px solid var(--line);background:#fff;color:var(--ink);
+  font-weight:600;transition:background .12s,border-color .12s,transform .05s;
+}
+.btn:hover{background:#f1f3f1;border-color:#b9c2be}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn.primary{background:var(--blade);border-color:#d99f00;color:var(--ink)}
+.btn.primary:hover{background:#ffc21a}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--danger);border-color:#e3b3a7}
+.btn.danger:hover{background:#fbeeea;border-color:var(--danger)}
+.btn svg{flex:0 0 auto}
+
+/* ---------- Estructura principal ---------- */
+.app{
+  flex:1;min-height:0;
+  display:grid;
+  grid-template-columns:172px minmax(0,1fr) 296px;
+}
+@media (max-width:960px){
+  body{overflow:auto}
+  .app{grid-template-columns:116px minmax(0,1fr);grid-template-rows:minmax(340px,60vh) auto}
+  .tools{grid-column:1 / -1;border-left:none;border-top:1px solid var(--line);
+         flex-direction:row;flex-wrap:wrap;align-items:flex-start}
+  .tools section{flex:1 1 260px}
+}
+
+/* ---------- Tira de miniaturas (lista virtual) ---------- */
+.strip{
+  position:relative;
+  border-right:1px solid var(--line);
+  background:var(--panel);
+  overflow-y:auto;overflow-x:hidden;
+  contain:strict;
+}
+#vSpacer{width:1px}
+.thumb{
+  position:absolute;left:10px;right:10px;top:0;
+  height:150px;
+  border:2px solid var(--line);
+  border-radius:8px;
+  background:#fff;
+  padding:6px 6px 22px;
+  cursor:grab;
+  user-select:none;
+  will-change:transform;
+  transition:border-color .12s, box-shadow .12s;
+}
+.thumb:hover{border-color:#a9b4af}
+.thumb.selected{border-color:var(--ink)}
+.thumb.current{border-color:var(--blade);box-shadow:0 0 0 3px rgba(245,179,1,.30)}
+.thumb.dragging{opacity:.35;cursor:grabbing}
+.thumb canvas{display:block;margin:0 auto;height:112px;width:auto;max-width:100%;
+              background:#fff;box-shadow:0 1px 3px rgba(31,36,40,.25)}
+.thumb .tnum{
+  position:absolute;left:6px;bottom:3px;
+  font-family:var(--font-mono);font-size:11px;font-weight:600;color:var(--muted)
+}
+.thumb .tsrc{
+  position:absolute;right:26px;bottom:4px;
+  font-family:var(--font-mono);font-size:9px;color:#fff;background:var(--muted);
+  border-radius:4px;padding:1px 4px
+}
+.thumb .tdel{
+  position:absolute;right:4px;bottom:2px;
+  border:none;background:none;color:var(--muted);
+  font-size:13px;line-height:1;padding:3px 4px;border-radius:5px
+}
+.thumb .tdel:hover{color:#fff;background:var(--danger)}
+#dropLine{
+  position:absolute;left:8px;right:8px;height:3px;border-radius:2px;
+  background:var(--blade);box-shadow:0 0 0 1px var(--blade-edge);
+  pointer-events:none;display:none;z-index:8;
+}
+
+/* ---------- Visor: tapete de corte ---------- */
+.viewer{display:flex;flex-direction:column;min-width:0}
+.viewerhead{
+  flex:0 0 auto;
+  display:flex;align-items:center;gap:10px;
+  padding:8px 16px;
+  border-bottom:1px solid var(--line);
+  background:var(--panel);
+  font-family:var(--font-mono);font-size:12px;color:var(--muted);
+  min-height:36px;
+}
+.viewerhead b{color:var(--ink);font-weight:600}
+.mat{
+  position:relative;flex:1;min-height:0;
+  overflow:auto;
+  display:grid;place-items:center;
+  padding:28px;
+  background:
+    repeating-linear-gradient(0deg,transparent 0 23px,var(--mat-grid) 23px 24px),
+    repeating-linear-gradient(90deg,transparent 0 23px,var(--mat-grid) 23px 24px),
+    var(--mat);
+}
+.pagebox{position:relative;line-height:0}
+.pagebox canvas{
+  display:block;background:#fff;
+  box-shadow:0 2px 6px rgba(0,0,0,.35), 0 14px 40px rgba(0,0,0,.30);
+}
+/* Zonas desechadas y marco de corte */
+.cover{position:absolute;background:rgba(18,22,25,.52);pointer-events:none;z-index:2}
+.frame{
+  position:absolute;pointer-events:none;z-index:3;
+  border:2px dashed var(--blade);
+  box-shadow:0 0 0 1px rgba(0,0,0,.35);
+}
+.frame.bad{border-color:var(--danger)}
+.frame .ftag{
+  position:absolute;left:-2px;top:-2px;transform:translateY(-100%);
+  background:var(--blade);color:var(--ink);
+  font-family:var(--font-mono);font-size:11px;font-weight:600;
+  padding:2px 7px;border-radius:4px 4px 4px 0;white-space:nowrap
+}
+.frame.bad .ftag{background:var(--danger);color:#fff}
+
+/* Cuchillas arrastrables: bordes y esquinas */
+.hzone,.hcorner{position:absolute;touch-action:none;z-index:5}
+.hzone.n,.hzone.s{height:16px;cursor:ns-resize}
+.hzone.w,.hzone.e{width:16px;cursor:ew-resize}
+.hzone::after{
+  content:'';position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  background:var(--blade);border:1px solid var(--blade-edge);border-radius:6px;
+  box-shadow:0 1px 2px rgba(0,0,0,.4);
+}
+.hzone.n::after,.hzone.s::after{width:46px;height:11px}
+.hzone.w::after,.hzone.e::after{width:11px;height:46px}
+.hzone:hover::after,.hcorner:hover::after{background:#ffc826}
+.hcorner{width:18px;height:18px;z-index:6}
+.hcorner::after{
+  content:'';position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:12px;height:12px;background:var(--blade);
+  border:1px solid var(--blade-edge);border-radius:3px;
+  box-shadow:0 1px 2px rgba(0,0,0,.4);
+}
+.hcorner.nw,.hcorner.se{cursor:nwse-resize}
+.hcorner.ne,.hcorner.sw{cursor:nesw-resize}
+
+/* Estado vacío */
+.empty{
+  position:absolute;inset:0;display:grid;place-items:center;text-align:center;
+  color:#dfe6e2;padding:24px;
+}
+.empty .card{
+  background:rgba(20,26,23,.55);border:1px dashed rgba(255,255,255,.35);
+  border-radius:14px;padding:36px 44px;backdrop-filter:blur(2px);
+}
+.empty h2{margin:0 0 6px;font-size:18px;font-weight:600;color:#fff}
+.empty p{margin:0 0 18px;font-size:13px;color:#cfd8d3}
+.empty .privacy{margin-top:16px;font-family:var(--font-mono);font-size:11px;color:#a9b8b0}
+body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
+
+/* ---------- Panel de herramientas ---------- */
+.tools{
+  border-left:1px solid var(--line);
+  background:var(--panel);
+  overflow-y:auto;
+  padding:14px;
+  display:flex;flex-direction:column;gap:14px;
+}
+.tools section{
+  background:#fff;border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px;box-shadow:0 1px 2px rgba(31,36,40,.05);
+}
+.eyebrow{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:10px;font-weight:600;
+  letter-spacing:.16em;color:var(--muted);
+  margin:0 0 10px;
+}
+.eyebrow::after{content:'';flex:1;height:1px;background:var(--line)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;color:var(--muted)}
+.field input[type=number], .field input[type=text]{
+  width:100%;padding:7px 8px;border:1px solid var(--line);border-radius:7px;
+  background:#fdfdfc;font-family:var(--font-mono);font-size:13px;
+}
+.field input:focus{border-color:var(--blade)}
+.check{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-top:8px}
+.check input{accent-color:var(--blade);width:15px;height:15px}
+.radios{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+.radios label{
+  display:flex;align-items:center;gap:5px;font-size:12px;
+  border:1px solid var(--line);border-radius:999px;padding:4px 10px;background:#fdfdfc;
+}
+.radios input{accent-color:var(--ink)}
+.radios label:has(input:checked){border-color:var(--ink);background:#f0f2f0;font-weight:600}
+.dims{
+  margin-top:10px;font-family:var(--font-mono);font-size:12px;color:var(--muted);
+  min-height:16px;
+}
+.dims.bad{color:var(--danger);font-weight:600}
+.row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.row .btn{flex:1;justify-content:center;padding:8px 10px}
+.chip{
+  display:none;align-items:center;gap:6px;margin-top:10px;
+  font-size:12px;color:var(--ok);font-weight:600
+}
+.chip.on{display:flex}
+.hint{margin:8px 0 0;font-size:11.5px;color:var(--muted);line-height:1.45}
+.inline{display:flex;gap:8px;align-items:flex-end}
+.inline .field{flex:1}
+.wnum{width:64px!important}
+
+/* ---------- Barra de estado y avisos ---------- */
+.status{
+  flex:0 0 auto;display:flex;gap:16px;align-items:center;
+  padding:6px 16px;border-top:1px solid var(--line);
+  background:var(--panel);
+  font-family:var(--font-mono);font-size:11px;color:var(--muted);
+}
+.status .spacer{flex:1}
+#toasts{position:fixed;left:50%;bottom:52px;transform:translateX(-50%);
+        display:flex;flex-direction:column;gap:8px;z-index:50;align-items:center}
+.toast{
+  background:var(--ink);color:#fff;padding:9px 16px;border-radius:9px;
+  font-size:13px;box-shadow:var(--shadow);animation:pop .18s ease-out;
+  max-width:80vw;
+}
+.toast.err{background:var(--danger)}
+.toast.ok{background:var(--ok)}
+@keyframes pop{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<!-- ======================= BARRA SUPERIOR ======================= -->
+<header class="topbar">
+  <div class="plate">
+    <h1>GUILLOTINA</h1>
+    <small>PROCESADOR&nbsp;DE&nbsp;PDF</small>
+  </div>
+  <div class="spacer"></div>
+  <button id="addBtn" class="btn" type="button">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    Añadir PDF
+  </button>
+  <button id="undoBtn" class="btn ghost" type="button" title="Ctrl+Z" disabled>Deshacer</button>
+  <button id="newBtn" class="btn ghost danger" type="button" disabled>Vaciar</button>
+  <button id="exportBtn" class="btn primary" type="button" disabled>
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8m0 0L4 6m3 3 3-3M2 12h10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Descargar PDF
+  </button>
+  <input id="fileInput" type="file" accept="application/pdf,.pdf" multiple hidden>
+</header>
+
+<!-- ======================= ZONA DE TRABAJO ======================= -->
+<main class="app">
+
+  <!-- Tira de páginas (virtualizada) -->
+  <aside id="thumbList" class="strip" aria-label="Páginas del documento">
+    <div id="vSpacer"></div>
+    <div id="dropLine"></div>
+  </aside>
+
+  <!-- Tapete de corte -->
+  <section class="viewer">
+    <div class="viewerhead" id="pageInfo">Sin documento</div>
+    <div class="mat" id="mat">
+      <div class="pagebox" id="pagebox" hidden>
+        <canvas id="mainCanvas"></canvas>
+        <div class="cover" id="covT"></div>
+        <div class="cover" id="covB"></div>
+        <div class="cover" id="covL"></div>
+        <div class="cover" id="covR"></div>
+        <div class="frame" id="frame"><span class="ftag" id="ftag"></span></div>
+        <div class="hzone n"  data-h="n"  aria-hidden="true"></div>
+        <div class="hzone s"  data-h="s"  aria-hidden="true"></div>
+        <div class="hzone w"  data-h="w"  aria-hidden="true"></div>
+        <div class="hzone e"  data-h="e"  aria-hidden="true"></div>
+        <div class="hcorner nw" data-h="nw" aria-hidden="true"></div>
+        <div class="hcorner ne" data-h="ne" aria-hidden="true"></div>
+        <div class="hcorner sw" data-h="sw" aria-hidden="true"></div>
+        <div class="hcorner se" data-h="se" aria-hidden="true"></div>
+      </div>
+      <div class="empty" id="emptyState">
+        <div class="card">
+          <h2>Arrastra tus PDF aquí</h2>
+          <p>o elígelos desde tu equipo. Varios archivos se unen en un solo documento.</p>
+          <button id="openBtn" class="btn primary" type="button">Abrir PDF</button>
+          <div class="privacy">PROCESAMIENTO 100&nbsp;% LOCAL · TUS ARCHIVOS NO SALEN DE ESTE NAVEGADOR</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Herramientas -->
+  <aside class="tools" aria-label="Herramientas">
+
+    <section id="toolCrop">
+      <h3 class="eyebrow">CORTE</h3>
+      <div class="grid2">
+        <div class="field"><label for="cropT">Arriba (cm)</label><input id="cropT" type="number" min="0" max="25" step="0.1" value="0"></div>
+        <div class="field"><label for="cropB">Abajo (cm)</label><input id="cropB" type="number" min="0" max="25" step="0.1" value="0"></div>
+        <div class="field"><label for="cropL">Izquierda (cm)</label><input id="cropL" type="number" min="0" max="25" step="0.1" value="0"></div>
+        <div class="field"><label for="cropR">Derecha (cm)</label><input id="cropR" type="number" min="0" max="25" step="0.1" value="0"></div>
+      </div>
+      <label class="check"><input id="resizeA4" type="checkbox" checked> Redimensionar el resultado a A4</label>
+      <label class="check"><input id="keepAspect" type="checkbox" checked> Mantener proporción (sin deformar)</label>
+      <div class="radios" role="radiogroup" aria-label="Aplicar corte a">
+        <label><input type="radio" name="scope" value="all" checked> Todas</label>
+        <label><input type="radio" name="scope" value="sel"> Seleccionadas</label>
+        <label><input type="radio" name="scope" value="cur"> Página actual</label>
+      </div>
+      <div class="dims" id="cropDims"></div>
+      <div class="row">
+        <button id="applyCrop" class="btn primary" type="button" disabled>Aplicar corte</button>
+        <button id="clearCrop" class="btn ghost" type="button" disabled>Quitar corte</button>
+      </div>
+      <div class="chip" id="cropChip">✂ Esta página tiene un corte aplicado</div>
+      <p class="hint">Arrastra las cuchillas amarillas de los bordes y esquinas de la página, o escribe los cm: tapete y panel quedan sincronizados al instante. La orientación del A4 se ajusta sola al área recortada.</p>
+    </section>
+
+    <section id="toolPages">
+      <h3 class="eyebrow">PÁGINAS</h3>
+      <div class="inline">
+        <div class="field">
+          <label for="delRange">Eliminar por número o intervalo</label>
+          <input id="delRange" type="text" placeholder="p. ej. 2, 5-8, 12" autocomplete="off">
+        </div>
+        <button id="delRangeBtn" class="btn danger" type="button">Eliminar</button>
+      </div>
+      <div class="row">
+        <button id="delSelBtn" class="btn danger" type="button" disabled>Eliminar seleccionadas</button>
+      </div>
+      <p class="hint">Clic para elegir la página actual · Ctrl+clic suma a la selección · Mayús+clic selecciona un rango · tecla Supr elimina la selección.</p>
+    </section>
+
+    <section id="toolOrder">
+      <h3 class="eyebrow">ORDEN</h3>
+      <p class="hint" style="margin-top:0">Arrastra las miniaturas para reordenar, o mueve por posición:</p>
+      <div class="inline" style="margin-top:8px">
+        <div class="field"><label for="moveFrom">De</label><input id="moveFrom" class="wnum" type="number" min="1" step="1"></div>
+        <div class="field"><label for="moveTo">A</label><input id="moveTo" class="wnum" type="number" min="1" step="1"></div>
+        <button id="moveBtn" class="btn" type="button">Mover</button>
+      </div>
+    </section>
+
+    <section id="toolMerge">
+      <h3 class="eyebrow">UNIR</h3>
+      <p class="hint" style="margin-top:0">Añade más archivos: sus páginas se agregan al final de la tira y todo se descarga como un único PDF.</p>
+      <div class="row"><button id="addBtn2" class="btn" type="button">Añadir otro PDF</button></div>
+    </section>
+
+  </aside>
+</main>
+
+<!-- ======================= BARRA DE ESTADO ======================= -->
+<footer class="status">
+  <span id="statusText">Listo</span>
+  <span class="spacer"></span>
+  <span>PROCESAMIENTO LOCAL · NADA SE SUBE A NINGÚN SERVIDOR</span>
+</footer>
+
+<div id="toasts" aria-live="polite"></div>
+
+<!-- Bibliotecas: pdf.js (render) + pdf-lib (edición/exportación) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+
+<script>
+'use strict';
+/* ============================================================
+   GUILLOTINA · lógica de la aplicación · v2
+   ------------------------------------------------------------
+   Reglas de arquitectura (críticas para el rendimiento):
+
+   1) INMUTABILIDAD. Los objetos de página {uid,srcId,idx,crop} y el
+      array state.pages NUNCA se mutan en sitio. Toda operación crea
+      un array nuevo (y objetos nuevos solo para las páginas tocadas).
+      Gracias a eso, cada snapshot de "deshacer" es una simple
+      referencia al array anterior: coste O(1) en tiempo y memoria.
+
+   2) LISTA VIRTUAL. La tira de miniaturas solo materializa las filas
+      visibles (+colchón). Con 50 000 páginas el DOM contiene ~20
+      nodos, no 50 000. Filas de altura fija → posición = índice.
+
+   3) ÍNDICES O(1). Mapas uid→página y uid→posición reconstruidos una
+      vez por operación estructural; nunca búsquedas lineales en
+      rutas calientes.
+
+   4) MAPAS DE BITS EN GPU. Las miniaturas se rasterizan una vez y se
+      guardan como ImageBitmap (caché LRU con cierre explícito);
+      volver a pintarlas —incluso con corte— es un drawImage de ~0,1 ms.
+
+   5) MEMORIA DE PÁGINA LIBERADA. Tras rasterizar una miniatura se
+      llama a page.cleanup() de pdf.js: las listas de operadores e
+      imágenes de páginas ya vistas no se acumulan.
+
+   6) BYTES BAJO DEMANDA. Se conserva el File (puntero a disco), no
+      una copia de los bytes: pdf.js recibe su propia copia (que el
+      worker se lleva) y pdf-lib relee el archivo solo al exportar.
+      Memoria base ≈ 1× el PDF, no 2-3×.
+
+   7) EXPORTACIÓN POR LOTES. Tramos consecutivos del mismo origen se
+      copian con una sola llamada copyPages(...lote...), con cesiones
+      periódicas al bucle de eventos para no congelar la interfaz.
+   ============================================================ */
+(() => {
+
+/* ---------- Constantes ---------- */
+const CM = 72 / 2.54;                     // 1 cm en puntos PDF
+const A4 = { w: 595.276, h: 841.89 };     // A4 en puntos
+const MINR_CM = 0.5;                      // área restante mínima por eje (cm)
+const STRIDE = 160;                       // paso de fila en la lista virtual (px)
+const ROW_PAD = 10;                       // margen superior/inferior de la tira
+const OVERSCAN = 4;                       // filas extra por encima/debajo
+const THUMB_CSS_H = 112;                  // alto visual de miniatura (px CSS)
+const CACHE_MAX = 260;                    // máx. ImageBitmaps en caché
+const UNDO_MAX = 40;
+const DIMS_CONC = 24;                     // concurrencia al medir páginas
+const EXPORT_CHUNK = 400;                 // páginas por llamada copyPages
+const MAIN_CAP_PX = 4096;                 // lado máx. del lienzo del visor
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const PDFJS_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+
+/* ---------- Estado ---------- */
+const state = {
+  sources: new Map(),   // srcId → {id,name,file,doc,pages,pageCache:Map}
+  pages: [],            // INMUTABLE: [{uid,srcId,idx,crop:null|{t,r,b,l,resizeA4,keepAspect}}]
+  sel: new Set(),
+  curUid: null,
+  anchorUid: null,
+  draft: { t: 0, r: 0, b: 0, l: 0, resizeA4: true, keepAspect: true },
+  undo: [],             // snapshots {pages(ref), cur, sel[], cropCount}
+  cropCount: 0,         // nº de páginas con corte (evita recorridos O(n))
+  srcSeq: 0,
+  uidSeq: 0,
+};
+
+/* Índices O(1), reconstruidos tras cada operación estructural */
+let pageMap = new Map();  // uid → página
+let uidPos = new Map();   // uid → posición
+function rebuildIndex() {
+  pageMap = new Map();
+  uidPos = new Map();
+  const arr = state.pages;
+  for (let i = 0; i < arr.length; i++) {
+    pageMap.set(arr[i].uid, arr[i]);
+    uidPos.set(arr[i].uid, i);
+  }
+}
+const pageByUid = (uid) => pageMap.get(uid) || null;
+const curPage = () => pageByUid(state.curUid);
+const posOfUid = (uid) => { const p = uidPos.get(uid); return p === undefined ? -1 : p; };
+
+/* ---------- Referencias DOM ---------- */
+const $ = (s) => document.querySelector(s);
+const dom = {
+  fileInput: $('#fileInput'), addBtn: $('#addBtn'), addBtn2: $('#addBtn2'),
+  openBtn: $('#openBtn'), undoBtn: $('#undoBtn'), newBtn: $('#newBtn'),
+  exportBtn: $('#exportBtn'), thumbList: $('#thumbList'),
+  vSpacer: $('#vSpacer'), dropLine: $('#dropLine'),
+  mat: $('#mat'), pagebox: $('#pagebox'), canvas: $('#mainCanvas'),
+  covT: $('#covT'), covB: $('#covB'), covL: $('#covL'), covR: $('#covR'),
+  frame: $('#frame'), ftag: $('#ftag'),
+  empty: $('#emptyState'), pageInfo: $('#pageInfo'),
+  cropT: $('#cropT'), cropR: $('#cropR'), cropB: $('#cropB'), cropL: $('#cropL'),
+  resizeA4: $('#resizeA4'), keepAspect: $('#keepAspect'),
+  cropDims: $('#cropDims'), applyCrop: $('#applyCrop'), clearCrop: $('#clearCrop'),
+  cropChip: $('#cropChip'),
+  delRange: $('#delRange'), delRangeBtn: $('#delRangeBtn'), delSelBtn: $('#delSelBtn'),
+  moveFrom: $('#moveFrom'), moveTo: $('#moveTo'), moveBtn: $('#moveBtn'),
+  statusText: $('#statusText'), toasts: $('#toasts'),
+};
+const handles = [...document.querySelectorAll('.hzone,.hcorner')];
+
+/* ---------- Utilidades ---------- */
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const yieldUI = () => new Promise((r) => setTimeout(r, 0));
+const fmtCm = (pt) => (pt / CM).toFixed(1).replace('.', ',');
+const bKey = (p) => p.srcId + ':' + p.idx;
+const cropSig = (p) => p.crop ? `${p.crop.t},${p.crop.r},${p.crop.b},${p.crop.l}` : '';
+
+function srcLetter(id) {
+  let s = '', n = id;
+  while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
+  return s;
+}
+function toast(msg, type = '') {
+  const t = document.createElement('div');
+  t.className = 'toast' + (type ? ' ' + type : '');
+  t.textContent = msg;
+  dom.toasts.appendChild(t);
+  setTimeout(() => t.remove(), 3400);
+}
+const setStatus = (txt) => { dom.statusText.textContent = txt; };
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (ch) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+/** "2, 5-8, 12" → posiciones 1-based ordenadas y únicas. Lanza Error con mensaje claro. */
+function parseRanges(str, max) {
+  const out = new Set();
+  const tokens = str.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!tokens.length) throw new Error('Escribe números o intervalos, p. ej. 2, 5-8');
+  for (const tk of tokens) {
+    let m;
+    if ((m = tk.match(/^(\d+)$/))) {
+      const n = +m[1];
+      if (n < 1 || n > max) throw new Error(`La página ${n} no existe (hay ${max})`);
+      out.add(n);
+    } else if ((m = tk.match(/^(\d+)\s*-\s*(\d+)$/))) {
+      const a = +m[1], b = +m[2];
+      if (a > b) throw new Error(`Intervalo invertido: ${a}-${b}`);
+      if (a < 1 || b > max) throw new Error(`El intervalo ${a}-${b} se sale del documento (1-${max})`);
+      for (let i = a; i <= b; i++) out.add(i);
+    } else {
+      throw new Error(`No entiendo «${tk}». Usa números o intervalos como 5-8`);
+    }
+  }
+  return [...out].sort((x, y) => x - y);
+}
+
+/* ---------- Deshacer (snapshots O(1) por inmutabilidad) ---------- */
+function takeSnap() {
+  return { pages: state.pages, cur: state.curUid, sel: [...state.sel], cropCount: state.cropCount };
+}
+function undoPush(snap) {
+  state.undo.push(snap);
+  if (state.undo.length > UNDO_MAX) state.undo.shift();
+  dom.undoBtn.disabled = false;
+}
+function undoAct() {
+  const s = state.undo.pop();
+  if (!s) return;
+  state.pages = s.pages;
+  state.cropCount = s.cropCount;
+  rebuildIndex();
+  state.sel = new Set(s.sel.filter((u) => pageMap.has(u)));
+  state.curUid = pageMap.has(s.cur) ? s.cur : (state.pages[0]?.uid ?? null);
+  state.anchorUid = state.curUid;
+  dom.undoBtn.disabled = !state.undo.length;
+  vlist.setCount();
+  refreshAll();
+  vlist.scrollToUid(state.curUid);
+  toast('Deshecho');
+}
+
+/* ---------- Documentos de origen ---------- */
+function getPage(srcId, idx) {
+  const src = state.sources.get(srcId);
+  let pr = src.pageCache.get(idx);
+  if (!pr) { pr = src.doc.getPage(idx + 1); src.pageCache.set(idx, pr); }
+  return pr;
+}
+
+async function addFiles(fileList) {
+  const files = [...fileList].filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  if (!files.length) { toast('Elige archivos PDF', 'err'); return; }
+  const snap = takeSnap();
+  const fresh = [];
+  for (const f of files) {
+    setStatus(`Abriendo ${f.name}…`);
+    try {
+      // pdf.js recibe SU copia (el worker se la queda); nosotros guardamos
+      // el File: los bytes para exportar se releen del disco bajo demanda.
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const doc = await pdfjsLib.getDocument({
+        data: bytes,
+        cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true,
+        standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
+      }).promise;
+      const id = ++state.srcSeq;
+      state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map() });
+      for (let i = 0; i < doc.numPages; i++) {
+        fresh.push({ uid: ++state.uidSeq, srcId: id, idx: i, crop: null });
+      }
+    } catch (e) {
+      const why = e?.name === 'PasswordException'
+        ? 'está protegido con contraseña'
+        : 'no es un PDF válido o está dañado';
+      toast(`No se pudo abrir «${f.name}»: ${why}`, 'err');
+    }
+  }
+  if (fresh.length) {
+    undoPush(snap);
+    state.pages = state.pages.concat(fresh);
+    rebuildIndex();
+    if (!state.curUid) {
+      state.curUid = state.pages[0].uid;
+      state.anchorUid = state.curUid;
+      state.sel = new Set([state.curUid]);
+    }
+    vlist.setCount();
+    refreshAll();
+    setStatus('Listo');
+    const n = fresh.length;
+    toast(`${n.toLocaleString('es')} página${n === 1 ? '' : 's'} añadida${n === 1 ? '' : 's'}`, 'ok');
+  } else {
+    setStatus('Listo');
+  }
+}
+
+/** Bytes de un origen bajo demanda (solo durante la exportación). */
+async function sourceBytes(srcId, cache) {
+  let b = cache.get(srcId);
+  if (!b) {
+    const src = state.sources.get(srcId);
+    try { b = await src.file.arrayBuffer(); }
+    catch { throw new Error(`No se pudo releer «${src.name}» del disco (¿se movió o eliminó?)`); }
+    cache.set(srcId, b);
+  }
+  return b;
+}
+
+/* ---------- Dimensiones de página (caché + medición concurrente) ---------- */
+const dims = new Map(); // bKey → {w,h} en puntos visuales
+
+async function ensureDims(uids) {
+  const missing = [];
+  const seen = new Set();
+  for (const u of uids) {
+    const p = pageByUid(u);
+    if (!p) continue;
+    const k = bKey(p);
+    if (!dims.has(k) && !seen.has(k)) { seen.add(k); missing.push(p); }
+  }
+  if (!missing.length) return;
+  let done = 0;
+  const total = missing.length;
+  const work = missing.slice();
+  async function worker() {
+    while (work.length) {
+      const p = work.pop();
+      const pg = await getPage(p.srcId, p.idx);
+      const vp = pg.getViewport({ scale: 1 });
+      dims.set(bKey(p), { w: vp.width, h: vp.height });
+      try { pg.cleanup(); } catch { /* render en curso: se libera después */ }
+      done++;
+      if (done % 250 === 0) {
+        setStatus(`Midiendo páginas… ${done.toLocaleString('es')}/${total.toLocaleString('es')}`);
+        await yieldUI();
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(DIMS_CONC, work.length) }, worker));
+}
+
+/* ---------- Caché de miniaturas: ImageBitmap con ciclo de vida explícito ---------- */
+const bmpCache = new Map(); // bKey → {bmp,w,h,vw,vh}
+const pendingThumbs = new Set(); // bKeys en cola o en render
+
+function evictIfNeeded() {
+  while (bmpCache.size > CACHE_MAX) {
+    const k = bmpCache.keys().next().value;
+    const e = bmpCache.get(k);
+    bmpCache.delete(k);
+    try { e.bmp.close?.(); } catch { /* ya cerrado */ }
+  }
+}
+
+async function rasterizeThumb(p) {
+  const page = await getPage(p.srcId, p.idx);
+  const vp1 = page.getViewport({ scale: 1 });
+  dims.set(bKey(p), { w: vp1.width, h: vp1.height });
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+  const scale = (THUMB_CSS_H * dpr) / vp1.height;
+  const vp = page.getViewport({ scale });
+  const cnv = document.createElement('canvas');
+  cnv.width = Math.max(1, Math.ceil(vp.width));
+  cnv.height = Math.max(1, Math.ceil(vp.height));
+  await page.render({ canvasContext: cnv.getContext('2d'), viewport: vp }).promise;
+  let bmp;
+  if (window.createImageBitmap) bmp = await createImageBitmap(cnv);
+  else bmp = cnv; // reserva para navegadores muy antiguos
+  const entry = { bmp, w: cnv.width, h: cnv.height, vw: vp1.width, vh: vp1.height };
+  if (bmp !== cnv) cnv.width = 0; // liberar el lienzo intermedio de inmediato
+  bmpCache.set(bKey(p), entry);
+  evictIfNeeded();
+  // Liberar listas de operadores/imágenes de pdf.js salvo en la página del visor
+  const cp = curPage();
+  if (!cp || cp.srcId !== p.srcId || cp.idx !== p.idx) {
+    try { page.cleanup(); } catch { /* render principal en curso */ }
+  }
+  return entry;
+}
+
+function blitThumb(cnv, bm, crop) {
+  const k = bm.w / bm.vw;
+  if (crop) {
+    const sx = crop.l * CM * k, sy = crop.t * CM * k;
+    const sw = Math.max(1, (bm.vw - (crop.l + crop.r) * CM) * k);
+    const sh = Math.max(1, (bm.vh - (crop.t + crop.b) * CM) * k);
+    cnv.width = Math.round(sw); cnv.height = Math.round(sh);
+    cnv.getContext('2d').drawImage(bm.bmp, sx, sy, sw, sh, 0, 0, cnv.width, cnv.height);
+  } else {
+    cnv.width = bm.w; cnv.height = bm.h;
+    cnv.getContext('2d').drawImage(bm.bmp, 0, 0);
+  }
+}
+
+/* Cola de rasterizado: concurrencia 2, descarta lo que ya no está en pantalla */
+const thumbJobs = [];
+let thumbActive = 0;
+
+function queueThumb(uid, key) {
+  if (pendingThumbs.has(key)) return;
+  pendingThumbs.add(key);
+  thumbJobs.push({ uid, key });
+  pumpThumbs();
+}
+function pumpThumbs() {
+  while (thumbActive < 2 && thumbJobs.length) {
+    const job = thumbJobs.shift();
+    const row = vlist.rowByUid(job.uid);
+    if (!row) { pendingThumbs.delete(job.key); continue; } // ya no es visible
+    thumbActive++;
+    runThumbJob(job).finally(() => { thumbActive--; pumpThumbs(); });
+  }
+}
+async function runThumbJob(job) {
+  const p = pageByUid(job.uid);
+  if (!p) { pendingThumbs.delete(job.key); return; }
+  let bm = null;
+  try { bm = await rasterizeThumb(p); }
+  catch {
+    try { bm = await rasterizeThumb(p); } // un reintento (p. ej. cleanup concurrente)
+    catch { /* página irrecuperable: se deja el marcador */ }
+  }
+  pendingThumbs.delete(job.key);
+  if (!bm) return;
+  const row = vlist.rowByUid(job.uid);
+  const pNow = pageByUid(job.uid);
+  if (row && pNow) {
+    blitThumb(row.querySelector('canvas'), bm, pNow.crop);
+    row.dataset.painted = '1';
+    row.dataset.cropSig = cropSig(pNow);
+  }
+}
+
+/* ---------- Lista virtual de miniaturas ---------- */
+const vlist = (() => {
+  const scroller = dom.thumbList;
+  const pool = [];
+  let rafPending = false;
+
+  function makeRow() {
+    const art = document.createElement('article');
+    art.className = 'thumb';
+    art.hidden = true;
+    art.draggable = true;
+    art.setAttribute('role', 'button');
+    art.setAttribute('aria-label', 'Página');
+    const cnv = document.createElement('canvas');
+    const num = document.createElement('span'); num.className = 'tnum';
+    const badge = document.createElement('span'); badge.className = 'tsrc'; badge.hidden = true;
+    const del = document.createElement('button');
+    del.className = 'tdel'; del.type = 'button'; del.textContent = '✕';
+    del.title = 'Eliminar esta página'; del.setAttribute('aria-label', 'Eliminar esta página');
+    art.append(cnv, num, badge, del);
+    scroller.appendChild(art);
+    return art;
+  }
+
+  function ensurePool() {
+    const need = Math.ceil(scroller.clientHeight / STRIDE) + OVERSCAN * 2 + 2;
+    while (pool.length < need) pool.push(makeRow());
+  }
+
+  function bindRow(row, idx) {
+    const p = state.pages[idx];
+    row.hidden = false;
+    row.style.transform = `translateY(${ROW_PAD + idx * STRIDE}px)`;
+    row.dataset.idx = idx;
+    row.querySelector('.tnum').textContent = (idx + 1).toLocaleString('es');
+    const uid = p.uid;
+    row.classList.toggle('selected', state.sel.has(uid));
+    row.classList.toggle('current', uid === state.curUid);
+    const badge = row.querySelector('.tsrc');
+    if (state.sources.size > 1) {
+      badge.hidden = false;
+      badge.textContent = srcLetter(p.srcId);
+      badge.title = state.sources.get(p.srcId)?.name || '';
+    } else badge.hidden = true;
+
+    const uidChanged = +row.dataset.uid !== uid;
+    const sigChanged = row.dataset.cropSig !== cropSig(p);
+    if (uidChanged) row.dataset.uid = uid;
+    if (uidChanged || sigChanged || row.dataset.painted !== '1') {
+      const key = bKey(p);
+      const bm = bmpCache.get(key);
+      const cnv = row.querySelector('canvas');
+      if (bm) {
+        blitThumb(cnv, bm, p.crop);
+        row.dataset.painted = '1';
+        row.dataset.cropSig = cropSig(p);
+      } else {
+        // Marcador en blanco con la proporción conocida (o A4 por defecto)
+        const d = dims.get(key);
+        const ratio = d ? d.w / d.h : 0.707;
+        cnv.height = 140;
+        cnv.width = Math.max(20, Math.round(140 * ratio));
+        row.dataset.painted = '0';
+        row.dataset.cropSig = cropSig(p);
+        queueThumb(uid, key);
+      }
+    }
+  }
+
+  function render() {
+    ensurePool();
+    const n = state.pages.length;
+    const first = clamp(
+      Math.floor((scroller.scrollTop - ROW_PAD) / STRIDE) - OVERSCAN,
+      0, Math.max(0, n - 1));
+    for (let i = 0; i < pool.length; i++) {
+      const row = pool[i];
+      if (row.classList.contains('dragging')) continue; // fila anclada durante el arrastre
+      const idx = first + i;
+      if (idx < n) bindRow(row, idx);
+      else { row.hidden = true; row.dataset.uid = ''; row.dataset.painted = ''; }
+    }
+    pumpThumbs();
+  }
+
+  function schedule() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; render(); });
+  }
+
+  scroller.addEventListener('scroll', schedule, { passive: true });
+  new ResizeObserver(schedule).observe(scroller);
+
+  return {
+    refresh: render,
+    schedule,
+    setCount() {
+      dom.vSpacer.style.height = (ROW_PAD * 2 + state.pages.length * STRIDE) + 'px';
+      render();
+    },
+    rowByUid(uid) {
+      for (const row of pool) if (!row.hidden && +row.dataset.uid === uid) return row;
+      return null;
+    },
+    indexFromY(clientY) {
+      const rect = scroller.getBoundingClientRect();
+      const y = clientY - rect.top + scroller.scrollTop;
+      return clamp(Math.round((y - ROW_PAD) / STRIDE), 0, state.pages.length);
+    },
+    scrollToUid(uid) {
+      const pos = posOfUid(uid);
+      if (pos < 0) return;
+      const top = ROW_PAD + pos * STRIDE;
+      const st = scroller.scrollTop, h = scroller.clientHeight;
+      if (top < st || top + STRIDE > st + h) {
+        scroller.scrollTop = Math.max(0, top - h / 2 + STRIDE / 2);
+      }
+      render();
+    },
+    poolRows: pool,
+  };
+})();
+
+/* ---------- Visor principal ---------- */
+let mainToken = 0;
+let mainTask = null;
+let lastVis = null; // {w,h} en puntos visuales de la página actual SIN corte
+const mainOff = document.createElement('canvas'); // reutilizado entre renders
+
+async function renderMain() {
+  const my = ++mainToken;
+  try { mainTask?.cancel(); } catch { /* sin tarea activa */ }
+  const p = curPage();
+
+  if (!p) {
+    dom.pagebox.hidden = true;
+    dom.empty.classList.remove('hidden');
+    dom.pageInfo.textContent = 'Sin documento';
+    lastVis = null;
+    return;
+  }
+  dom.empty.classList.add('hidden');
+  dom.pagebox.hidden = false;
+
+  const src = state.sources.get(p.srcId);
+  let page;
+  try { page = await getPage(p.srcId, p.idx); } catch { return; }
+  if (my !== mainToken) return;
+
+  const vp1 = page.getViewport({ scale: 1 });
+  lastVis = { w: vp1.width, h: vp1.height };
+  dims.set(bKey(p), { w: vp1.width, h: vp1.height });
+
+  const c = p.crop;
+  const visW = c ? vp1.width - (c.l + c.r) * CM : vp1.width;
+  const visH = c ? vp1.height - (c.t + c.b) * CM : vp1.height;
+
+  const pos = posOfUid(p.uid) + 1;
+  const near = (a, b) => Math.abs(a - b) < 3;
+  const sizeName = (near(vp1.width, A4.w) && near(vp1.height, A4.h)) ? 'A4'
+                 : (near(vp1.width, A4.h) && near(vp1.height, A4.w)) ? 'A4 apaisado' : '';
+  dom.pageInfo.innerHTML =
+    `<b>Página ${pos.toLocaleString('es')} de ${state.pages.length.toLocaleString('es')}</b> · ${escapeHtml(src.name)} · ` +
+    `${fmtCm(vp1.width)} × ${fmtCm(vp1.height)} cm${sizeName ? ' (' + sizeName + ')' : ''}` +
+    (c ? ` · <b style="color:var(--ok)">corte: ${fmtCm(visW)} × ${fmtCm(visH)} cm</b>` : '');
+
+  const box = dom.mat.getBoundingClientRect();
+  const pad = 72;
+  const os = Math.min(window.devicePixelRatio || 1, 2);
+  let fit = clamp(Math.min((box.width - pad) / visW, (box.height - pad) / visH), 0.05, 4);
+  // Tope duro del lienzo interno: cortes muy pequeños no disparan la memoria
+  fit = Math.min(fit, MAIN_CAP_PX / (Math.max(vp1.width, vp1.height) * os));
+  const cssW = visW * fit, cssH = visH * fit;
+
+  dom.canvas.style.width = cssW + 'px';
+  dom.canvas.style.height = cssH + 'px';
+  dom.canvas.width = Math.max(1, Math.round(cssW * os));
+  dom.canvas.height = Math.max(1, Math.round(cssH * os));
+  const ctx = dom.canvas.getContext('2d');
+
+  const vp = page.getViewport({ scale: fit * os });
+
+  try {
+    if (!c) {
+      mainTask = page.render({ canvasContext: ctx, viewport: vp });
+      await mainTask.promise;
+    } else {
+      mainOff.width = Math.max(1, Math.ceil(vp.width));
+      mainOff.height = Math.max(1, Math.ceil(vp.height));
+      mainTask = page.render({ canvasContext: mainOff.getContext('2d'), viewport: vp });
+      await mainTask.promise;
+      if (my !== mainToken) return;
+      const k = fit * os;
+      ctx.drawImage(mainOff,
+        c.l * CM * k, c.t * CM * k, visW * k, visH * k,
+        0, 0, dom.canvas.width, dom.canvas.height);
+    }
+  } catch (e) {
+    if (e?.name !== 'RenderingCancelledException') console.error(e);
+    return;
+  }
+  if (my !== mainToken) return;
+  overlaySync();
+}
+
+/* ---------- Sobrecapa de corte: cuchillas en tiempo real ---------- */
+function draftActive() {
+  const d = state.draft;
+  return d.t > 0 || d.r > 0 || d.b > 0 || d.l > 0;
+}
+
+let overlayRaf = false;
+function scheduleOverlay() {
+  if (overlayRaf) return;
+  overlayRaf = true;
+  requestAnimationFrame(() => { overlayRaf = false; overlaySync(); });
+}
+
+function overlaySync() {
+  const p = curPage();
+  const show = !!p && !p.crop && !!lastVis;
+  const parts = [dom.covT, dom.covB, dom.covL, dom.covR, dom.frame, ...handles];
+  if (!show) { parts.forEach((el) => { el.style.display = 'none'; }); syncCropButtons(); return; }
+  parts.forEach((el) => { el.style.display = 'block'; });
+
+  const d = state.draft;
+  const W = dom.canvas.clientWidth, H = dom.canvas.clientHeight;
+  const kx = W / lastVis.w, ky = H / lastVis.h;
+  const t = d.t * CM * ky, b = d.b * CM * ky, l = d.l * CM * kx, r = d.r * CM * kx;
+
+  Object.assign(dom.covT.style, { left: '0', right: '0', top: '0', height: t + 'px' });
+  Object.assign(dom.covB.style, { left: '0', right: '0', bottom: '0', height: b + 'px' });
+  Object.assign(dom.covL.style, { left: '0', top: t + 'px', bottom: b + 'px', width: l + 'px' });
+  Object.assign(dom.covR.style, { right: '0', top: t + 'px', bottom: b + 'px', width: r + 'px' });
+  Object.assign(dom.frame.style, { left: l + 'px', right: r + 'px', top: t + 'px', bottom: b + 'px' });
+  placeHandles(t, b, l, r);
+
+  const remW = lastVis.w - (d.l + d.r) * CM;
+  const remH = lastVis.h - (d.t + d.b) * CM;
+  const bad = remW < MINR_CM * CM || remH < MINR_CM * CM;
+  dom.frame.classList.toggle('bad', bad);
+  dom.ftag.textContent = bad
+    ? 'El corte excede la página'
+    : `${fmtCm(remW)} × ${fmtCm(remH)} cm${draftActive() && d.resizeA4 ? ' → A4' : ''}`;
+  syncCropButtons();
+}
+
+function placeHandles(t, b, l, r) {
+  const H = 8; // mitad del grosor de la zona de agarre
+  for (const h of handles) {
+    const k = h.dataset.h;
+    const s = h.style;
+    if (k === 'n') { s.top = (t - H) + 'px'; s.left = (l + 12) + 'px'; s.right = (r + 12) + 'px'; s.bottom = 'auto'; }
+    else if (k === 's') { s.bottom = (b - H) + 'px'; s.left = (l + 12) + 'px'; s.right = (r + 12) + 'px'; s.top = 'auto'; }
+    else if (k === 'w') { s.left = (l - H) + 'px'; s.top = (t + 12) + 'px'; s.bottom = (b + 12) + 'px'; s.right = 'auto'; }
+    else if (k === 'e') { s.right = (r - H) + 'px'; s.top = (t + 12) + 'px'; s.bottom = (b + 12) + 'px'; s.left = 'auto'; }
+    else if (k === 'nw') { s.top = (t - 9) + 'px'; s.left = (l - 9) + 'px'; s.right = 'auto'; s.bottom = 'auto'; }
+    else if (k === 'ne') { s.top = (t - 9) + 'px'; s.right = (r - 9) + 'px'; s.left = 'auto'; s.bottom = 'auto'; }
+    else if (k === 'sw') { s.bottom = (b - 9) + 'px'; s.left = (l - 9) + 'px'; s.right = 'auto'; s.top = 'auto'; }
+    else if (k === 'se') { s.bottom = (b - 9) + 'px'; s.right = (r - 9) + 'px'; s.left = 'auto'; s.top = 'auto'; }
+  }
+}
+
+/* Arrastre de cuchillas: sincroniza tapete ⇄ panel */
+let hDrag = null;
+
+function syncInputsFromDraft() {
+  const d = state.draft;
+  const w = (el, v) => { el.value = String(Math.round(v * 10) / 10); };
+  w(dom.cropT, d.t); w(dom.cropB, d.b); w(dom.cropL, d.l); w(dom.cropR, d.r);
+}
+
+function onHandleDown(e) {
+  const p = curPage();
+  if (!p || p.crop || !lastVis) return;
+  e.preventDefault();
+  e.currentTarget.setPointerCapture(e.pointerId);
+  hDrag = {
+    h: e.currentTarget.dataset.h,
+    x: e.clientX, y: e.clientY,
+    d: { ...state.draft },
+    kx: dom.canvas.clientWidth / lastVis.w,
+    ky: dom.canvas.clientHeight / lastVis.h,
+  };
+  document.body.classList.add('resizing');
+}
+function onHandleMove(e) {
+  if (!hDrag) return;
+  const dxCm = (e.clientX - hDrag.x) / (hDrag.kx * CM);
+  const dyCm = (e.clientY - hDrag.y) / (hDrag.ky * CM);
+  const pW = lastVis.w / CM, pH = lastVis.h / CM;
+  const o = hDrag.d, d = state.draft, h = hDrag.h;
+  const snap = (v) => Math.round(v * 10) / 10;
+  if (h.includes('n')) d.t = clamp(snap(o.t + dyCm), 0, snap(pH - o.b - MINR_CM));
+  if (h.includes('s')) d.b = clamp(snap(o.b - dyCm), 0, snap(pH - o.t - MINR_CM));
+  if (h.includes('w')) d.l = clamp(snap(o.l + dxCm), 0, snap(pW - o.r - MINR_CM));
+  if (h.includes('e')) d.r = clamp(snap(o.r - dxCm), 0, snap(pW - o.l - MINR_CM));
+  syncInputsFromDraft();
+  scheduleOverlay();
+}
+function onHandleUp(e) {
+  if (!hDrag) return;
+  hDrag = null;
+  document.body.classList.remove('resizing');
+  syncInputsFromDraft();
+  overlaySync();
+}
+
+function syncCropButtons() {
+  const p = curPage();
+  const d = state.draft;
+  const anyPages = state.pages.length > 0;
+  let bad = false;
+  if (lastVis && p && !p.crop) {
+    bad = (lastVis.w - (d.l + d.r) * CM) < MINR_CM * CM
+       || (lastVis.h - (d.t + d.b) * CM) < MINR_CM * CM;
+  }
+  dom.applyCrop.disabled = !anyPages || !draftActive() || bad;
+  dom.clearCrop.disabled = state.cropCount === 0;
+  dom.cropChip.classList.toggle('on', !!p?.crop);
+  dom.keepAspect.disabled = !dom.resizeA4.checked;
+
+  const el = dom.cropDims;
+  if (!anyPages || !lastVis) { el.textContent = ''; el.classList.remove('bad'); return; }
+  if (p?.crop) {
+    el.textContent = 'La vista muestra el resultado del corte aplicado.';
+    el.classList.remove('bad');
+  } else if (!draftActive()) {
+    el.textContent = `Página actual: ${fmtCm(lastVis.w)} × ${fmtCm(lastVis.h)} cm`;
+    el.classList.remove('bad');
+  } else {
+    const remW = lastVis.w - (d.l + d.r) * CM;
+    const remH = lastVis.h - (d.t + d.b) * CM;
+    if (remW < MINR_CM * CM || remH < MINR_CM * CM) {
+      el.textContent = 'El corte excede la página actual.';
+      el.classList.add('bad');
+    } else {
+      el.textContent = `Resultado: ${fmtCm(remW)} × ${fmtCm(remH)} cm${d.resizeA4 ? ' → A4' : ''}`;
+      el.classList.remove('bad');
+    }
+  }
+}
+
+/* ---------- Corte: aplicar / quitar (sin mutar objetos) ---------- */
+function scopeUids() {
+  const v = document.querySelector('input[name=scope]:checked').value;
+  if (v === 'all') return state.pages.map((p) => p.uid);
+  if (v === 'sel') return state.pages.filter((p) => state.sel.has(p.uid)).map((p) => p.uid);
+  return state.curUid != null ? [state.curUid] : [];
+}
+
+async function applyCrop() {
+  const uids = scopeUids();
+  if (!uids.length) { toast('No hay páginas en ese ámbito', 'err'); return; }
+  const d = state.draft;
+  dom.applyCrop.disabled = true;
+  try {
+    await ensureDims(uids);
+  } catch {
+    setStatus('Listo');
+    toast('No se pudieron leer algunas páginas', 'err');
+    syncCropButtons();
+    return;
+  }
+  const bad = [];
+  for (const uid of uids) {
+    const dm = dims.get(bKey(pageByUid(uid)));
+    if (!dm ||
+        dm.w - (d.l + d.r) * CM < MINR_CM * CM ||
+        dm.h - (d.t + d.b) * CM < MINR_CM * CM) {
+      bad.push(posOfUid(uid) + 1);
+      if (bad.length >= 12) break;
+    }
+  }
+  if (bad.length) {
+    setStatus('Listo');
+    toast(`El corte no cabe en las páginas: ${bad.join(', ')}${bad.length >= 12 ? '…' : ''}`, 'err');
+    syncCropButtons();
+    return;
+  }
+  const snap = takeSnap();
+  const set = new Set(uids);
+  const crop = { t: d.t, r: d.r, b: d.b, l: d.l, resizeA4: d.resizeA4, keepAspect: d.keepAspect };
+  let added = 0;
+  state.pages = state.pages.map((p) => {
+    if (!set.has(p.uid)) return p;
+    if (!p.crop) added++;
+    return { ...p, crop };
+  });
+  state.cropCount += added;
+  rebuildIndex();
+  undoPush(snap);
+  vlist.refresh();
+  renderMain();
+  setStatus('Listo');
+  const n = uids.length;
+  toast(`Corte aplicado a ${n.toLocaleString('es')} página${n === 1 ? '' : 's'}`, 'ok');
+}
+
+function clearCrop() {
+  let set = new Set(scopeUids().filter((u) => pageByUid(u)?.crop));
+  if (!set.size) set = new Set(state.pages.filter((p) => p.crop).map((p) => p.uid));
+  if (!set.size) return;
+  const snap = takeSnap();
+  state.pages = state.pages.map((p) => set.has(p.uid) ? { ...p, crop: null } : p);
+  state.cropCount -= set.size;
+  rebuildIndex();
+  undoPush(snap);
+  vlist.refresh();
+  renderMain();
+  toast('Corte retirado');
+}
+
+/* ---------- Eliminación ---------- */
+function deleteUids(uids) {
+  const set = new Set(uids);
+  if (!set.size) return;
+  const snap = takeSnap();
+  const oldPos = state.curUid != null ? posOfUid(state.curUid) : 0;
+  let removedCrops = 0;
+  state.pages = state.pages.filter((p) => {
+    if (!set.has(p.uid)) return true;
+    if (p.crop) removedCrops++;
+    return false;
+  });
+  state.cropCount -= removedCrops;
+  set.forEach((u) => state.sel.delete(u));
+  rebuildIndex();
+  if (set.has(state.curUid)) {
+    const np = state.pages[clamp(oldPos, 0, state.pages.length - 1)];
+    state.curUid = np ? np.uid : null;
+    state.anchorUid = state.curUid;
+    if (state.curUid) state.sel.add(state.curUid);
+  }
+  undoPush(snap);
+  vlist.setCount();
+  refreshAll();
+  if (state.curUid) vlist.scrollToUid(state.curUid);
+  const n = set.size;
+  toast(`${n.toLocaleString('es')} página${n === 1 ? '' : 's'} eliminada${n === 1 ? '' : 's'}`);
+}
+
+function deleteByRange() {
+  try {
+    const positions = parseRanges(dom.delRange.value, state.pages.length);
+    deleteUids(positions.map((n) => state.pages[n - 1].uid));
+    dom.delRange.value = '';
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+/* ---------- Reordenado (índices, no nodos) ---------- */
+let dragUid = null;
+let dragSnap = null;
+let dropIdx = null;
+
+function showDropLine(idx) {
+  dropIdx = idx;
+  dom.dropLine.style.display = 'block';
+  dom.dropLine.style.top = (ROW_PAD + idx * STRIDE - 6) + 'px';
+}
+function hideDropLine() {
+  dropIdx = null;
+  dom.dropLine.style.display = 'none';
+}
+
+function commitMove(uid, insertIdx) {
+  const from = posOfUid(uid);
+  if (from < 0 || insertIdx == null) return;
+  let to = insertIdx;
+  if (to > from) to--;
+  to = clamp(to, 0, state.pages.length - 1);
+  if (to === from) return;
+  const snap = dragSnap || takeSnap();
+  const next = state.pages.slice();
+  const [pg] = next.splice(from, 1);
+  next.splice(to, 0, pg);
+  state.pages = next;
+  rebuildIndex();
+  undoPush(snap);
+  vlist.refresh();
+  renderMain();
+}
+
+function moveByInputs() {
+  const n = state.pages.length;
+  const from = Math.round(+dom.moveFrom.value);
+  const to = Math.round(+dom.moveTo.value);
+  if (!n) return;
+  if (!(from >= 1 && from <= n) || !(to >= 1 && to <= n)) {
+    toast(`Usa posiciones entre 1 y ${n.toLocaleString('es')}`, 'err');
+    return;
+  }
+  if (from === to) return;
+  const snap = takeSnap();
+  const next = state.pages.slice();
+  const [pg] = next.splice(from - 1, 1);
+  next.splice(to - 1, 0, pg);
+  state.pages = next;
+  rebuildIndex();
+  undoPush(snap);
+  vlist.refresh();
+  vlist.scrollToUid(pg.uid);
+  renderMain();
+  toast(`Página movida de ${from} a ${to}`, 'ok');
+}
+
+/* ---------- Selección ---------- */
+function selectClick(uid, ev) {
+  if (ev.ctrlKey || ev.metaKey) {
+    if (state.sel.has(uid)) state.sel.delete(uid); else state.sel.add(uid);
+    state.curUid = uid;
+    state.anchorUid = uid;
+  } else if (ev.shiftKey && state.anchorUid != null) {
+    const a = posOfUid(state.anchorUid), b = posOfUid(uid);
+    if (a >= 0 && b >= 0) {
+      state.sel = new Set(state.pages.slice(Math.min(a, b), Math.max(a, b) + 1).map((p) => p.uid));
+    }
+    state.curUid = uid;
+  } else {
+    state.sel = new Set([uid]);
+    state.curUid = uid;
+    state.anchorUid = uid;
+  }
+  dom.delSelBtn.disabled = !state.sel.size;
+  vlist.refresh();
+  statusSync();
+  renderMain();
+}
+
+/* ---------- Exportación (pdf-lib, por lotes) ---------- */
+const rotNorm = (a) => ((a % 360) + 360) % 360;
+
+/** Márgenes visuales (t,r,b,l en puntos) → márgenes en coordenadas sin rotar {L,R,T,B}. */
+function visualToUnrotated(rot, t, r, b, l) {
+  switch (rot) {
+    case 90:  return { L: t, T: r, R: b, B: l };
+    case 180: return { L: r, R: l, T: b, B: t };
+    case 270: return { L: b, B: r, R: t, T: l };
+    default:  return { L: l, R: r, T: t, B: b };
+  }
+}
+
+/** Dibuja una página incrustada respetando la rotación de visualización. */
+function drawEmbedded(pg, emb, rot, dx, dy, dw, dh) {
+  const { degrees } = PDFLib;
+  if (rot === 90)       pg.drawPage(emb, { x: dx,      y: dy + dh, width: dh, height: dw, rotate: degrees(-90) });
+  else if (rot === 180) pg.drawPage(emb, { x: dx + dw, y: dy + dh, width: dw, height: dh, rotate: degrees(180) });
+  else if (rot === 270) pg.drawPage(emb, { x: dx + dw, y: dy,      width: dh, height: dw, rotate: degrees(90) });
+  else                  pg.drawPage(emb, { x: dx,      y: dy,      width: dw, height: dh });
+}
+
+async function exportPdf() {
+  if (!state.pages.length) return;
+  const { PDFDocument } = PDFLib;
+  dom.exportBtn.disabled = true;
+  const total = state.pages.length;
+  const bytesCache = new Map();
+  const libDocs = new Map();
+  let processed = 0, lastReport = 0;
+
+  const report = async (force) => {
+    if (force || processed - lastReport >= 150) {
+      lastReport = processed;
+      setStatus(`Exportando ${processed.toLocaleString('es')}/${total.toLocaleString('es')}…`);
+      await yieldUI();
+    }
+  };
+  const libDoc = async (srcId) => {
+    let d = libDocs.get(srcId);
+    if (!d) {
+      setStatus(`Leyendo «${state.sources.get(srcId).name}»…`);
+      await yieldUI();
+      d = await PDFDocument.load(await sourceBytes(srcId, bytesCache));
+      libDocs.set(srcId, d);
+    }
+    return d;
+  };
+
+  try {
+    setStatus('Preparando exportación…');
+    const out = await PDFDocument.create();
+
+    // Copia por lotes: tramos consecutivos sin corte del mismo origen
+    let run = null; // {srcId, idxs:[]}
+    const flushRun = async () => {
+      if (!run) return;
+      const sdoc = await libDoc(run.srcId);
+      for (let o = 0; o < run.idxs.length; o += EXPORT_CHUNK) {
+        const part = run.idxs.slice(o, o + EXPORT_CHUNK);
+        const cps = await out.copyPages(sdoc, part);
+        for (const cp of cps) out.addPage(cp);
+        processed += part.length;
+        await report(false);
+      }
+      run = null;
+    };
+
+    for (let i = 0; i < total; i++) {
+      const ref = state.pages[i];
+
+      if (!ref.crop) {
+        if (run && run.srcId === ref.srcId) run.idxs.push(ref.idx);
+        else { await flushRun(); run = { srcId: ref.srcId, idxs: [ref.idx] }; }
+        continue;
+      }
+
+      await flushRun();
+      const sdoc = await libDoc(ref.srcId);
+      const spage = sdoc.getPage(ref.idx);
+      const rot = rotNorm(spage.getRotation().angle);
+      const mb = spage.getMediaBox();
+      const c = ref.crop;
+      const m = visualToUnrotated(rot, c.t * CM, c.r * CM, c.b * CM, c.l * CM);
+      const cw = mb.width - m.L - m.R;
+      const ch = mb.height - m.T - m.B;
+      if (cw <= 1 || ch <= 1) throw new Error(`El corte de la página ${i + 1} excede su tamaño`);
+      const rect = { left: mb.x + m.L, bottom: mb.y + m.B, right: mb.x + mb.width - m.R, top: mb.y + mb.height - m.T };
+
+      if (c.resizeA4) {
+        const emb = await out.embedPage(spage, rect);
+        const visW = (rot === 90 || rot === 270) ? ch : cw;
+        const visH = (rot === 90 || rot === 270) ? cw : ch;
+        const landscape = visW > visH;
+        const W = landscape ? A4.h : A4.w;
+        const H = landscape ? A4.w : A4.h;
+        const pg = out.addPage([W, H]);
+        let dx = 0, dy = 0, dw = W, dh = H;
+        if (c.keepAspect) {
+          const s = Math.min(W / visW, H / visH);
+          dw = visW * s; dh = visH * s;
+          dx = (W - dw) / 2; dy = (H - dh) / 2;
+        }
+        drawEmbedded(pg, emb, rot, dx, dy, dw, dh);
+      } else {
+        const [cp] = await out.copyPages(sdoc, [ref.idx]);
+        cp.setMediaBox(rect.left, rect.bottom, cw, ch);
+        cp.setCropBox(rect.left, rect.bottom, cw, ch);
+        out.addPage(cp);
+      }
+      processed++;
+      await report(false);
+    }
+    await flushRun();
+    await report(true);
+
+    setStatus('Guardando archivo…');
+    await yieldUI();
+    const bytes = await out.save();
+    const first = [...state.sources.values()][0];
+    const name = state.sources.size > 1
+      ? 'documentos-unidos.pdf'
+      : first.name.replace(/\.pdf$/i, '') + '-editado.pdf';
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    setStatus('Listo');
+    toast(`Descargado: ${name}`, 'ok');
+  } catch (e) {
+    console.error(e);
+    setStatus('Listo');
+    toast('No se pudo exportar: ' + (e.message || 'error inesperado'), 'err');
+  } finally {
+    bytesCache.clear();
+    dom.exportBtn.disabled = state.pages.length === 0;
+  }
+}
+
+/* ---------- Vaciar proyecto ---------- */
+function resetAll() {
+  if (!state.pages.length && !state.sources.size) return;
+  if (!confirm('Se vaciará todo el proyecto (los archivos originales de tu disco no se tocan). ¿Continuar?')) return;
+  for (const s of state.sources.values()) { try { s.doc.destroy(); } catch { /* ya liberado */ } }
+  for (const e of bmpCache.values()) { try { e.bmp.close?.(); } catch { /* ya cerrado */ } }
+  state.sources.clear();
+  state.pages = [];
+  state.sel.clear();
+  state.curUid = null;
+  state.anchorUid = null;
+  state.undo = [];
+  state.cropCount = 0;
+  rebuildIndex();
+  bmpCache.clear();
+  pendingThumbs.clear();
+  thumbJobs.length = 0;
+  dims.clear();
+  dom.undoBtn.disabled = true;
+  dom.thumbList.scrollTop = 0;
+  vlist.setCount();
+  refreshAll();
+  setStatus('Listo');
+}
+
+/* ---------- Refrescos generales ---------- */
+function statusSync() {
+  if (!state.pages.length) { setStatus('Listo'); return; }
+  const n = state.pages.length;
+  const s = state.sel.size;
+  const docs = state.sources.size;
+  setStatus(`${n.toLocaleString('es')} página${n === 1 ? '' : 's'} · ${docs} documento${docs === 1 ? '' : 's'} · ${s.toLocaleString('es')} seleccionada${s === 1 ? '' : 's'}`);
+}
+
+function refreshAll() {
+  const has = state.pages.length > 0;
+  dom.exportBtn.disabled = !has;
+  dom.newBtn.disabled = !has && !state.sources.size;
+  dom.delSelBtn.disabled = !state.sel.size;
+  vlist.refresh();
+  statusSync();
+  renderMain();
+}
+
+/* ---------- Cableado de eventos ---------- */
+function readDraft() {
+  const num = (el) => clamp(parseFloat(el.value) || 0, 0, 25);
+  state.draft.t = num(dom.cropT);
+  state.draft.b = num(dom.cropB);
+  state.draft.l = num(dom.cropL);
+  state.draft.r = num(dom.cropR);
+  state.draft.resizeA4 = dom.resizeA4.checked;
+  state.draft.keepAspect = dom.keepAspect.checked;
+  scheduleOverlay();
+}
+
+function wire() {
+  // Abrir / añadir archivos
+  const pick = () => dom.fileInput.click();
+  dom.addBtn.addEventListener('click', pick);
+  dom.addBtn2.addEventListener('click', pick);
+  dom.openBtn.addEventListener('click', pick);
+  dom.fileInput.addEventListener('change', () => {
+    addFiles(dom.fileInput.files);
+    dom.fileInput.value = '';
+  });
+
+  // Arrastrar y soltar archivos en toda la ventana
+  let dragDepth = 0;
+  window.addEventListener('dragenter', (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes('Files')) {
+      dragDepth++;
+      document.body.classList.add('dropping');
+    }
+  });
+  window.addEventListener('dragleave', () => {
+    if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dropping'); }
+  });
+  window.addEventListener('dragover', (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+  });
+  window.addEventListener('drop', (e) => {
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+    if (e.dataTransfer?.files?.length) {
+      e.preventDefault();
+      addFiles(e.dataTransfer.files);
+    }
+  });
+
+  // Barra superior
+  dom.undoBtn.addEventListener('click', undoAct);
+  dom.newBtn.addEventListener('click', resetAll);
+  dom.exportBtn.addEventListener('click', exportPdf);
+
+  // Corte: campos numéricos
+  [dom.cropT, dom.cropR, dom.cropB, dom.cropL].forEach((el) =>
+    el.addEventListener('input', readDraft));
+  dom.resizeA4.addEventListener('change', readDraft);
+  dom.keepAspect.addEventListener('change', readDraft);
+  document.querySelectorAll('input[name=scope]').forEach((el) =>
+    el.addEventListener('change', syncCropButtons));
+  dom.applyCrop.addEventListener('click', applyCrop);
+  dom.clearCrop.addEventListener('click', clearCrop);
+
+  // Corte: cuchillas arrastrables (tapete ⇄ panel)
+  for (const h of handles) {
+    h.addEventListener('pointerdown', onHandleDown);
+    h.addEventListener('pointermove', onHandleMove);
+    h.addEventListener('pointerup', onHandleUp);
+    h.addEventListener('pointercancel', onHandleUp);
+  }
+
+  // Páginas
+  dom.delRangeBtn.addEventListener('click', deleteByRange);
+  dom.delRange.addEventListener('keydown', (e) => { if (e.key === 'Enter') deleteByRange(); });
+  dom.delSelBtn.addEventListener('click', () => deleteUids([...state.sel]));
+
+  // Orden por posición
+  dom.moveBtn.addEventListener('click', moveByInputs);
+
+  // Tira: selección, borrado por miniatura y arrastre de reordenado
+  dom.thumbList.addEventListener('click', (e) => {
+    const art = e.target.closest('.thumb');
+    if (!art || art.hidden) return;
+    const uid = +art.dataset.uid;
+    if (!pageMap.has(uid)) return;
+    if (e.target.closest('.tdel')) { deleteUids([uid]); return; }
+    selectClick(uid, e);
+  });
+  dom.thumbList.addEventListener('dragstart', (e) => {
+    const art = e.target.closest('.thumb');
+    if (!art || art.hidden) return;
+    dragUid = +art.dataset.uid;
+    dragSnap = takeSnap();
+    art.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', String(dragUid)); } catch { /* motores antiguos */ }
+  });
+  dom.thumbList.addEventListener('dragover', (e) => {
+    if (dragUid == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    showDropLine(vlist.indexFromY(e.clientY));
+    // Autodesplazamiento en los bordes de la tira
+    const rect = dom.thumbList.getBoundingClientRect();
+    if (e.clientY < rect.top + 44) dom.thumbList.scrollTop -= 14;
+    else if (e.clientY > rect.bottom - 44) dom.thumbList.scrollTop += 14;
+  });
+  dom.thumbList.addEventListener('drop', (e) => {
+    if (dragUid == null) return;
+    e.preventDefault();
+  });
+  dom.thumbList.addEventListener('dragend', () => {
+    for (const row of vlist.poolRows) row.classList.remove('dragging');
+    if (dragUid != null && dropIdx != null) commitMove(dragUid, dropIdx);
+    dragUid = null;
+    dragSnap = null;
+    hideDropLine();
+    vlist.refresh();
+  });
+
+  // Teclado
+  window.addEventListener('keydown', (e) => {
+    const tag = document.activeElement?.tagName;
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && state.sel.size) {
+      e.preventDefault();
+      deleteUids([...state.sel]);
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
+      e.preventDefault();
+      undoAct();
+    }
+  });
+
+  // Reajuste del visor al cambiar el tamaño
+  let rzT;
+  new ResizeObserver(() => {
+    clearTimeout(rzT);
+    rzT = setTimeout(renderMain, 120);
+  }).observe(dom.mat);
+}
+
+/* ---------- Arranque ---------- */
+wire();
+readDraft();
+vlist.setCount();
+refreshAll();
+
+})();
+</script>
+</body>
+</html>

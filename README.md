@@ -2,6 +2,11 @@
 
 # ✂️ Guillotina PDF
 
+🌐 **Languages**
+
+- 🇺🇸 **English**
+- 🇪🇸 [Español](README.es.md)
+
 ### High-performance PDF editor built for the browser.
 
 Fast. Private. Local.

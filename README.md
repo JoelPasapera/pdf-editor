@@ -16,10 +16,12 @@ Fast. Private. Local.
 
 ---
 
-🌐 **Languages**
+## 🌐 Idioma
 
-- 🇺🇸 **English**
+- 🇺🇸 English
 - 🇪🇸 [Español](README.es.md)
+
+---
 
 ## 📖 Overview
 

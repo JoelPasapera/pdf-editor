@@ -19,7 +19,7 @@ Fast. Private. Local.
 ## 🌐 Idioma
 
 - 🇺🇸 English
-- 🇪🇸 [Español](README.es.md)
+- 🇪🇸 [Español](https://github.com/JoelPasapera/pdf-editor/blob/ed917503b34d89149ae1c78b3784e3e09e699984/REAMDE.es.md)
 
 ---
 

@@ -63,15 +63,30 @@ const applyM = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m
 
 /* ---------- utilidades PDF ---------- */
 function escWinAnsi(s) {
-  let out = '', dropped = 0;
+  let out = '', plain = '', dropped = 0;
   for (const ch of s) {
     const c = ch.codePointAt(0);
-    if (ch === '(' || ch === ')' || ch === '\\') out += '\\' + ch;
-    else if (c >= 32 && c <= 126) out += ch;
-    else if (c >= 160 && c < 256) out += '\\' + c.toString(8).padStart(3, '0');
-    else { out += '?'; dropped++; }
+    if (ch === '(' || ch === ')' || ch === '\\') { out += '\\' + ch; plain += ch; }
+    else if (c >= 32 && c <= 126) { out += ch; plain += ch; }
+    else if (c >= 160 && c < 256) { out += '\\' + c.toString(8).padStart(3, '0'); plain += ch; }
+    else { out += '?'; plain += '?'; dropped++; }
   }
-  return { out, dropped };
+  return { out, plain, dropped };
+}
+
+/* Las 14 fuentes base del PDF: sin incrustar nada, cualquier visor las trae. */
+const FONT14 = {
+  helv:  ['Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'],
+  times: ['Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic'],
+  cour:  ['Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique'],
+};
+const resolveFontName = (st) =>
+  (FONT14[st?.family] || FONT14.helv)[(st?.bold ? 1 : 0) + (st?.italic ? 2 : 0)];
+
+function textWidthPt(font, plain, size) {
+  let w = 0;
+  for (const ch of plain) w += font.advanceGlyph(font.encodeCharacter(ch.codePointAt(0)), 0);
+  return w * size;
 }
 
 /* Encadena un stream nuevo de operadores por referencia, sin copiar
@@ -140,18 +155,27 @@ function decodeColor(raw) {
   return [0, 0, 0];
 }
 
-function insertTextOps(rec, idx, page, x, baselineY, text, size, color) {
-  const { out, dropped } = escWinAnsi(text);
+function insertTextOps(rec, idx, page, x, baselineY, text, size, color, style) {
+  const { out, plain, dropped } = escWinAnsi(text);
   const inv = invAffine(page.getTransform());
   const [px, py] = applyM(inv, x, baselineY);
-  const fontRef = rec.doc.addSimpleFont(new mupdf.Font('Helvetica'), 'Latin');
+  const font = new mupdf.Font(resolveFontName(style));
+  const fontRef = rec.doc.addSimpleFont(font, 'Latin');
   const fonts = ensureRes(rec, page, 'Font');
   const fname = freshName(rec, fonts, 'GLF');
   fonts.put(fname, fontRef);
   const [r, g, b] = color;
-  appendContent(rec, idx, page,
+  let ops =
     `q BT /${fname} ${size.toFixed(2)} Tf ${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg ` +
-    `1 0 0 1 ${px.toFixed(2)} ${py.toFixed(2)} Tm (${out}) Tj ET Q`);
+    `1 0 0 1 ${px.toFixed(2)} ${py.toFixed(2)} Tm (${out}) Tj ET`;
+  if (style?.underline && plain.length) {
+    const w = textWidthPt(font, plain, size);
+    const uy = py - size * 0.11;
+    const th = Math.max(size * 0.055, 0.4);
+    ops += ` ${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG ${th.toFixed(2)} w ` +
+      `${px.toFixed(2)} ${uy.toFixed(2)} m ${(px + w).toFixed(2)} ${uy.toFixed(2)} l S`;
+  }
+  appendContent(rec, idx, page, ops + ' Q');
   return dropped;
 }
 
@@ -184,6 +208,7 @@ function contentOf(rec, idx) {
         cur.size = size || 12;
         cur.baseline = Array.isArray(origin) ? origin[1] : (origin?.y ?? 0);
         cur.color = decodeColor(color);
+        cur.font = font?.getName?.() || '';
       }
     },
     endLine() {
@@ -277,7 +302,7 @@ export const api = {
 
   /* --- operaciones (cada una = 1 paso del journal) --- */
 
-  async opReplaceText({ key, idx, rect, text, size, color, baseline }) {
+  async opReplaceText({ key, idx, rect, text, size, color, baseline, style }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('reemplazar texto');
     let dropped = 0;
@@ -287,18 +312,18 @@ export const api = {
         mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_TEXT_REMOVE);
       if (text && text.length) {
         dropped = insertTextOps(rec, idx, page, rect.x0,
-          baseline ?? (rect.y1 - (rect.y1 - rect.y0) * 0.22), text, size, color);
+          baseline ?? (rect.y1 - (rect.y1 - rect.y0) * 0.22), text, size, color, style);
       }
     } finally { rec.doc.endOperation(); invalidate(rec); }
     return { dropped, undo: undoInfo(rec) };
   },
 
-  async opAddText({ key, idx, x, baseline, text, size, color }) {
+  async opAddText({ key, idx, x, baseline, text, size, color, style }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('añadir texto');
     let dropped = 0;
     try {
-      dropped = insertTextOps(rec, idx, rec.doc.loadPage(idx), x, baseline, text, size, color);
+      dropped = insertTextOps(rec, idx, rec.doc.loadPage(idx), x, baseline, text, size, color, style);
     } finally { rec.doc.endOperation(); invalidate(rec); }
     return { dropped, undo: undoInfo(rec) };
   },

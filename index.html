@@ -370,7 +370,7 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
 .txed input[type=number]{width:60px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-family:var(--font-mono);font-size:12px}
 .txed input[type=color]{width:32px;height:27px;padding:1px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
 .txed .fila .btn{padding:5px 10px;font-size:12px}
-.txed select{padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:#fff;cursor:pointer}
+.txed select{padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:#fff;cursor:pointer;max-width:200px}
 .txtog{width:30px;height:27px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--ink)}
 .txtog.on{background:var(--blade);border-color:var(--blade-edge)}
 .txed .nota{font-size:10.5px;color:var(--muted);margin-top:7px}
@@ -464,9 +464,35 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
           <div class="fila">
             <label for="txFont">Fuente</label>
             <select id="txFont">
-              <option value="helv">Helvética</option>
-              <option value="times">Times</option>
-              <option value="cour">Courier</option>
+              <optgroup label="Básicas (ligeras)">
+                <option value="helv">Helvética</option>
+                <option value="times">Times</option>
+                <option value="cour">Courier</option>
+              </optgroup>
+              <optgroup label="Estilo ofimático">
+                <option value="tinos">Tinos · tipo Times New Roman</option>
+                <option value="cousine">Cousine · tipo Courier New</option>
+                <option value="carlito">Carlito · tipo Calibri</option>
+                <option value="caladea">Caladea · tipo Cambria</option>
+              </optgroup>
+              <optgroup label="Sans populares">
+                <option value="firasans">Fira Sans</option>
+                <option value="barlow">Barlow</option>
+                <option value="lato">Lato</option>
+                <option value="poppins">Poppins</option>
+                <option value="ptsans">PT Sans</option>
+              </optgroup>
+              <optgroup label="Serifa clásica">
+                <option value="crimson">Crimson Text</option>
+              </optgroup>
+              <optgroup label="Divertidas y caligráficas">
+                <option value="comic">Comic Neue</option>
+                <option value="bebas">Bebas Neue</option>
+                <option value="pacifico">Pacifico</option>
+                <option value="greatvibes">Great Vibes</option>
+                <option value="lobster">Lobster</option>
+                <option value="indieflower">Indie Flower</option>
+              </optgroup>
             </select>
             <button class="txtog" id="txB" type="button" title="Negrita"><b>N</b></button>
             <button class="txtog" id="txI" type="button" title="Cursiva"><i>K</i></button>
@@ -479,7 +505,7 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
             <button class="btn danger" id="txDel" type="button">Borrar</button>
             <button class="btn primary" id="txSave" type="button">Guardar</button>
           </div>
-          <div class="nota" id="txNota">Fuentes base del PDF · acentos españoles compatibles</div>
+          <div class="nota" id="txNota">Fuentes libres · se incrustan al usarlas (≈20–60 KB) · acentos y € compatibles</div>
         </div>
       </div>
 
@@ -1925,6 +1951,26 @@ async function eRun(fn) {
   }
 }
 
+/* Fuentes incrustables: se descargan y cargan en el motor SOLO al usarlas. */
+const engFonts = { worker: null, ready: new Set(), files: new Map() };
+
+async function ensureEngineFont(fontId) {
+  if (!fontId) return;
+  if (engFonts.worker !== engWorker) engFonts.ready = new Set();
+  if (engFonts.ready.has(fontId)) return;
+  let buf = engFonts.files.get(fontId);
+  if (!buf) {
+    const res = await fetch('./vendor/fonts/' + fontId + '.ttf');
+    if (!res.ok) throw new Error('No se pudo descargar la fuente ' + fontId);
+    buf = await res.arrayBuffer();
+    engFonts.files.set(fontId, buf);
+  }
+  const copy = buf.slice(0);
+  await engine('loadFont', { fontId, bytes: copy }, [copy]);
+  engFonts.worker = engWorker;
+  engFonts.ready.add(fontId);
+}
+
 const eSetStatus = (t) => { dom.eStatus.textContent = t; };
 const rgb01ToHex = (c) => '#' + c.map((v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0')).join('');
 const hexTo01 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -2211,11 +2257,69 @@ function setTool(t) {
 }
 
 /* --- editor flotante de texto --- */
+/* Catálogo de familias incrustables (archivos en vendor/fonts, licencia OFL). */
+const EMBED = {
+  tinos:       { label: 'Tinos', r: 'Tinos-Regular', b: 'Tinos-Bold', i: 'Tinos-Italic', bi: 'Tinos-BoldItalic' },
+  cousine:     { label: 'Cousine', r: 'Cousine-Regular', b: 'Cousine-Bold', i: 'Cousine-Italic', bi: 'Cousine-BoldItalic' },
+  carlito:     { label: 'Carlito', r: 'Carlito-Regular', b: 'Carlito-Bold', i: 'Carlito-Italic', bi: 'Carlito-BoldItalic' },
+  caladea:     { label: 'Caladea', r: 'Caladea-Regular', b: 'Caladea-Bold', i: 'Caladea-Italic', bi: 'Caladea-BoldItalic' },
+  firasans:    { label: 'Fira Sans', r: 'FiraSans-Regular', b: 'FiraSans-Bold', i: 'FiraSans-Italic', bi: 'FiraSans-BoldItalic' },
+  barlow:      { label: 'Barlow', r: 'Barlow-Regular', b: 'Barlow-Bold', i: 'Barlow-Italic', bi: 'Barlow-BoldItalic' },
+  lato:        { label: 'Lato', r: 'Lato-Regular', b: 'Lato-Bold', i: 'Lato-Italic', bi: 'Lato-BoldItalic' },
+  poppins:     { label: 'Poppins', r: 'Poppins-Regular', b: 'Poppins-Bold', i: 'Poppins-Italic', bi: 'Poppins-BoldItalic' },
+  ptsans:      { label: 'PT Sans', r: 'PTSans-Regular', b: 'PTSans-Bold', i: 'PTSans-Italic', bi: 'PTSans-BoldItalic' },
+  crimson:     { label: 'Crimson Text', r: 'CrimsonText-Regular', b: 'CrimsonText-Bold', i: 'CrimsonText-Italic', bi: 'CrimsonText-BoldItalic' },
+  comic:       { label: 'Comic Neue', r: 'ComicNeue-Regular', b: 'ComicNeue-Bold', i: 'ComicNeue-Italic', bi: 'ComicNeue-BoldItalic' },
+  bebas:       { label: 'Bebas Neue', r: 'BebasNeue-Regular' },
+  pacifico:    { label: 'Pacifico', r: 'Pacifico-Regular' },
+  greatvibes:  { label: 'Great Vibes', r: 'GreatVibes-Regular' },
+  lobster:     { label: 'Lobster', r: 'Lobster-Regular' },
+  indieflower: { label: 'Indie Flower', r: 'IndieFlower-Regular' },
+};
+
+function variantOf(fam, bold, italic) {
+  const f = EMBED[fam];
+  if (!f) return null;
+  if (bold && italic) return f.bi || f.b || f.i || f.r;
+  if (bold) return f.b || f.bi || f.r;
+  if (italic) return f.i || f.bi || f.r;
+  return f.r;
+}
+
+/* Vista previa del campo de texto con la fuente real (FontFace). */
+const previewFaces = new Set();
+function ensurePreviewFace(variantId) {
+  if (!variantId || previewFaces.has(variantId)) return;
+  previewFaces.add(variantId);
+  try {
+    const face = new FontFace(variantId, 'url(./vendor/fonts/' + variantId + '.ttf)');
+    face.load().then(() => { document.fonts.add(face); txStyleSync(); }).catch(() => { /* cae al genérico */ });
+  } catch { /* FontFace no disponible */ }
+}
+
 function guessStyle(name) {
-  const n = (name || '').toLowerCase();
+  const n = (name || '').replace(/^[A-Z]{6}\+/, '').toLowerCase().replace(/[\s_-]/g, '');
+  const fam =
+    n.includes('tinos') ? 'tinos'
+    : n.includes('cousine') ? 'cousine'
+    : n.includes('carlito') ? 'carlito'
+    : n.includes('caladea') ? 'caladea'
+    : n.includes('firasans') ? 'firasans'
+    : n.includes('barlow') ? 'barlow'
+    : n.includes('lato') ? 'lato'
+    : n.includes('poppins') ? 'poppins'
+    : n.includes('ptsans') ? 'ptsans'
+    : n.includes('crimson') ? 'crimson'
+    : n.includes('comicneue') ? 'comic'
+    : n.includes('bebas') ? 'bebas'
+    : n.includes('pacifico') ? 'pacifico'
+    : n.includes('greatvibes') ? 'greatvibes'
+    : n.includes('lobster') ? 'lobster'
+    : n.includes('indieflower') ? 'indieflower'
+    : (/(times|serif|georgia|garamond|roman|book)/.test(n) ? 'times'
+      : /(courier|mono|consol)/.test(n) ? 'cour' : 'helv');
   return {
-    family: /times|serif|georgia|garamond|roman|book/.test(n) ? 'times'
-      : /courier|mono|consol/.test(n) ? 'cour' : 'helv',
+    family: fam,
     bold: /bold|black|heavy|semi|demi|medium/.test(n),
     italic: /italic|oblique/.test(n),
     underline: false,
@@ -2241,17 +2345,29 @@ function readTxStyle() {
 
 function txStyleSync() {
   const st = readTxStyle();
-  const fam = {
-    helv: 'Helvetica, Arial, sans-serif',
-    times: '"Times New Roman", Times, serif',
-    cour: '"Courier New", monospace',
-  }[st.family];
-  Object.assign(dom.txInput.style, {
-    fontFamily: fam,
-    fontWeight: st.bold ? '700' : '400',
-    fontStyle: st.italic ? 'italic' : 'normal',
-    textDecoration: st.underline ? 'underline' : 'none',
-  });
+  const emb = EMBED[st.family];
+  let css;
+  if (emb) {
+    const vid = variantOf(st.family, st.bold, st.italic);
+    ensurePreviewFace(vid);
+    css = { fontFamily: '"' + vid + '", sans-serif', fontWeight: '400', fontStyle: 'normal' };
+  } else {
+    const fam = {
+      helv: 'Helvetica, Arial, sans-serif',
+      times: '"Times New Roman", Times, serif',
+      cour: '"Courier New", monospace',
+    }[st.family] || 'sans-serif';
+    css = { fontFamily: fam, fontWeight: st.bold ? '700' : '400', fontStyle: st.italic ? 'italic' : 'normal' };
+  }
+  css.textDecoration = st.underline ? 'underline' : 'none';
+  Object.assign(dom.txInput.style, css);
+  /* familias sin negrita o cursiva propias: botón no disponible */
+  const noB = !!(emb && !(emb.b || emb.bi));
+  const noI = !!(emb && !(emb.i || emb.bi));
+  dom.txB.disabled = noB;
+  dom.txI.disabled = noI;
+  if (noB) dom.txB.classList.remove('on');
+  if (noI) dom.txI.classList.remove('on');
 }
 
 function positionTxEd(cssX, cssY) {
@@ -2295,8 +2411,10 @@ function txCommit() {
   const size = clamp(parseFloat(dom.txSize.value) || 12, 4, 200);
   const color = hexTo01(dom.txColor.value || '#000000');
   const style = readTxStyle();
+  style.fontId = variantOf(style.family, style.bold, style.italic);
   hideTxEd();
   eRun(async () => {
+    if (style.fontId) await ensureEngineFont(style.fontId);
     let r, patch;
     if (ctx.mode === 'replace') {
       const l = ctx.line;

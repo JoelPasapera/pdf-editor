@@ -62,6 +62,16 @@ const invAffine = (m) => {
 const applyM = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 
 /* ---------- utilidades PDF ---------- */
+/* Zona alta de WinAnsi (0x80–0x9F): euro, comillas tipográficas, guiones… */
+const WIN_EXTRA = {
+  0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85,
+  0x2020: 0x86, 0x2021: 0x87, 0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A,
+  0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91, 0x2019: 0x92,
+  0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97,
+  0x02DC: 0x98, 0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C,
+  0x017E: 0x9E, 0x0178: 0x9F,
+};
+
 function escWinAnsi(s) {
   let out = '', plain = '', dropped = 0;
   for (const ch of s) {
@@ -69,6 +79,7 @@ function escWinAnsi(s) {
     if (ch === '(' || ch === ')' || ch === '\\') { out += '\\' + ch; plain += ch; }
     else if (c >= 32 && c <= 126) { out += ch; plain += ch; }
     else if (c >= 160 && c < 256) { out += '\\' + c.toString(8).padStart(3, '0'); plain += ch; }
+    else if (WIN_EXTRA[c]) { out += '\\' + WIN_EXTRA[c].toString(8).padStart(3, '0'); plain += ch; }
     else { out += '?'; plain += '?'; dropped++; }
   }
   return { out, plain, dropped };
@@ -82,6 +93,21 @@ const FONT14 = {
 };
 const resolveFontName = (st) =>
   (FONT14[st?.family] || FONT14.helv)[(st?.bold ? 1 : 0) + (st?.italic ? 2 : 0)];
+
+/* Fuentes cargadas en el motor (base-14 y TTF incrustables), por id. */
+const fontCache = new Map();
+
+function resolveFont(style) {
+  if (style?.fontId) {
+    const f = fontCache.get('E:' + style.fontId);
+    if (!f) throw new Error('fuente no cargada en el motor: ' + style.fontId);
+    return { font: f, key: 'E:' + style.fontId };
+  }
+  const name = resolveFontName(style);
+  let f = fontCache.get('B:' + name);
+  if (!f) { f = new mupdf.Font(name); fontCache.set('B:' + name, f); }
+  return { font: f, key: 'B:' + name };
+}
 
 function textWidthPt(font, plain, size) {
   let w = 0;
@@ -159,8 +185,12 @@ function insertTextOps(rec, idx, page, x, baselineY, text, size, color, style) {
   const { out, plain, dropped } = escWinAnsi(text);
   const inv = invAffine(page.getTransform());
   const [px, py] = applyM(inv, x, baselineY);
-  const font = new mupdf.Font(resolveFontName(style));
-  const fontRef = rec.doc.addSimpleFont(font, 'Latin');
+  const { font, key } = resolveFont(style);
+  let fontRef = rec.fontRefs.get(key);
+  if (!fontRef) {
+    fontRef = rec.doc.addSimpleFont(font, 'Latin'); // la TTF se incrusta UNA vez por documento
+    rec.fontRefs.set(key, fontRef);
+  }
   const fonts = ensureRes(rec, page, 'Font');
   const fname = freshName(rec, fonts, 'GLF');
   fonts.put(fname, fontRef);
@@ -246,7 +276,7 @@ export const api = {
     api.close({ key });
     const doc = mupdf.PDFDocument.openDocument(bytes, 'application/pdf');
     doc.enableJournal();
-    docs.set(key, { doc, resSeq: 0, pages: new Map(), wrapped: new Set() });
+    docs.set(key, { doc, resSeq: 0, pages: new Map(), wrapped: new Set(), fontRefs: new Map() });
     return { pages: doc.countPages() };
   },
 
@@ -383,22 +413,33 @@ export const api = {
     return { undo: undoInfo(rec) };
   },
 
+  /* Carga una fuente TTF en el registro del motor (una vez por sesión). */
+  async loadFont({ fontId, bytes }) {
+    await ensureEngine();
+    if (!fontCache.has('E:' + fontId)) {
+      fontCache.set('E:' + fontId, new mupdf.Font(fontId, new Uint8Array(bytes)));
+    }
+    return { loaded: true };
+  },
+
   /* --- journal --- */
   undoState({ key }) { return { undo: undoInfo(getDoc(key)) }; },
   undo({ key }) {
     const rec = getDoc(key);
-    if (rec.doc.canUndo()) { rec.doc.undo(); invalidate(rec); rec.wrapped.clear(); }
+    if (rec.doc.canUndo()) { rec.doc.undo(); invalidate(rec); rec.wrapped.clear(); rec.fontRefs.clear(); }
     return { undo: undoInfo(rec) };
   },
   redo({ key }) {
     const rec = getDoc(key);
-    if (rec.doc.canRedo()) { rec.doc.redo(); invalidate(rec); rec.wrapped.clear(); }
+    if (rec.doc.canRedo()) { rec.doc.redo(); invalidate(rec); rec.wrapped.clear(); rec.fontRefs.clear(); }
     return { undo: undoInfo(rec) };
   },
 
   async save({ key }) {
     const rec = getDoc(key);
-    const buf = rec.doc.saveToBuffer('').asUint8Array();
+    // Las TTF de vendor/fonts ya vienen subconjuntadas a WinAnsi en origen:
+    // no se subconjunta en runtime (rompería las métricas de extracción).
+    const buf = rec.doc.saveToBuffer('garbage,compress').asUint8Array();
     const bytes = new Uint8Array(buf);
     return { bytes: bytes.buffer, _transfer: [bytes.buffer] };
   },

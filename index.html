@@ -322,8 +322,15 @@ body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
 .editbar .estado{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-left:4px}
 .editbar .spacer{flex:1}
 body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:saturate(.5)}
-.editwrap{position:relative;line-height:0}
-.editwrap canvas{display:block;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.35), 0 14px 40px rgba(0,0,0,.30)}
+.mat{position:relative}
+.editwrap{position:absolute;inset:12px;overflow:hidden;line-height:0}
+#editStage{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+.editwrap canvas{display:block;background:transparent}
+.ezoom{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:5px;z-index:8}
+.ezoom button{width:36px;height:34px;border:1px solid var(--blade-edge);border-radius:8px;background:var(--blade);color:var(--ink);font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35);line-height:1}
+.ezoom button:hover{filter:brightness(1.06)}
+.ezpct{width:36px;text-align:center;font-family:var(--font-mono);font-size:10px;color:#fff;background:rgba(31,36,40,.78);border-radius:6px;padding:4px 0}
+.viewer:fullscreen{background:var(--panel)}
 .editwrap.busy{cursor:progress}
 .editwrap.busy::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.30)}
 #editOverlay{position:absolute;inset:0}
@@ -397,6 +404,7 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
   <button class="tool" id="etText" type="button" data-tool="text">+ Texto</button>
   <button class="tool" id="etImg" type="button" data-tool="image">+ Imagen</button>
   <button class="tool" id="etErase" type="button" data-tool="erase">Borrar zona</button>
+  <button class="tool" id="etPan" type="button" data-tool="pan">✋ Mover vista</button>
   <span class="sep"></span>
   <button class="tool" id="eUndo" type="button" disabled>↶ Deshacer</button>
   <button class="tool" id="eRedo" type="button" disabled>↷ Rehacer</button>
@@ -424,9 +432,18 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
         <div class="hcorner se" data-h="se" aria-hidden="true"></div>
       </div>
       <div class="editwrap" id="editwrap" hidden>
-        <canvas id="editCanvas"></canvas>
-        <div id="editOverlay"></div>
-        <div class="marquee" id="marquee"></div>
+        <div id="editStage">
+          <canvas id="editCanvas"></canvas>
+          <div id="editOverlay"></div>
+          <div class="marquee" id="marquee"></div>
+        </div>
+        <div class="ezoom" id="ezoom">
+          <button id="ezFull" type="button" title="Pantalla completa (F)">⛶</button>
+          <button id="ezIn" type="button" title="Acercar (+)">＋</button>
+          <div class="ezpct" id="ezPct">100 %</div>
+          <button id="ezOut" type="button" title="Alejar (−)">−</button>
+          <button id="ezFit" type="button" title="Ajustar a la ventana (0)">▭</button>
+        </div>
         <div class="txed" id="txEd" hidden>
           <input type="text" id="txInput" autocomplete="off" spellcheck="false">
           <div class="fila">
@@ -637,6 +654,8 @@ const dom = {
   eCancel: $('#eCancel'), eDone: $('#eDone'), eImgFile: $('#eImgFile'),
   txEd: $('#txEd'), txInput: $('#txInput'), txSize: $('#txSize'),
   txColor: $('#txColor'), txDel: $('#txDel'), txSave: $('#txSave'),
+  editStage: $('#editStage'), ezPct: $('#ezPct'), ezIn: $('#ezIn'), ezOut: $('#ezOut'), ezFit: $('#ezFit'), ezFull: $('#ezFull'),
+  viewerSec: $('.viewer'),
 };
 const handles = [...document.querySelectorAll('.hzone,.hcorner')];
 
@@ -1590,16 +1609,26 @@ async function exportPdf() {
 
 /* ============================================================
    MODO EDICIÓN — edición real del contenido con motor MuPDF
-   El contenido original se ELIMINA del archivo (no se tapa) y el
-   nuevo se inserta como contenido nativo. El worker vive en
-   js/engine-worker.js y el motor en vendor/mupdf/ (local).
+   v3.1: viewport con zoom y paneo, pantalla completa, render
+   parcial por parches (solo se repinta la zona tocada o visible)
+   y previsualización instantánea por transformación CSS.
+   El worker vive en js/engine-worker.js y el motor en
+   vendor/mupdf/ (local).
    ============================================================ */
 const ed = {
   active: false, srcId: null, idx: 0, uid: null,
-  tool: 'select', scale: 1, cssScale: 1, pw: 0, ph: 0,
+  tool: 'select',
+  pw: 0, ph: 0,
+  fit: 1, zoom: 1,          // escala CSS = fit * zoom (px por punto)
+  panX: 0, panY: 0,         // punto fitz visible en la esquina sup-izq
+  vw: 0, vh: 0, os: 1,
+  base: null,               // {s, panX, panY} del último render asentado
   lines: [], images: [], selImg: null,
   dirty: false, busy: false, pendingImg: null, txCtx: null,
+  space: false,
 };
+const eS = () => ed.fit * ed.zoom;
+const eKey = () => 'S' + ed.srcId;
 
 /* --- cliente RPC del worker del motor --- */
 let engWorker = null, engSeq = 0;
@@ -1626,7 +1655,7 @@ function engine(cmd, args, transfer) {
         for (const p of engPending.values()) p.reject(err);
         engPending.clear();
         try { engWorker.terminate(); } catch { /* nada */ }
-        engWorker = null; // permite reintentar
+        engWorker = null;
       };
     }
     const id = ++engSeq;
@@ -1647,10 +1676,157 @@ async function eRun(fn) {
   }
 }
 
-const eKey = () => 'S' + ed.srcId;
 const eSetStatus = (t) => { dom.eStatus.textContent = t; };
 const rgb01ToHex = (c) => '#' + c.map((v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0')).join('');
 const hexTo01 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+
+/* --- geometría del viewport --- */
+function eLayout() {
+  ed.vw = dom.editwrap.clientWidth;
+  ed.vh = dom.editwrap.clientHeight;
+  ed.os = Math.min(window.devicePixelRatio || 1, 2);
+  const capOs = MAIN_CAP_PX / Math.max(ed.vw, ed.vh, 1);
+  if (ed.os > capOs) ed.os = Math.max(1, capOs);
+  ed.fit = clamp(Math.min(ed.vw / ed.pw, ed.vh / ed.ph) * 0.96, 0.02, 20);
+}
+
+function eClampPan() {
+  const s = eS();
+  const cw = ed.vw / s, ch = ed.vh / s;
+  ed.panX = (ed.pw <= cw) ? -(cw - ed.pw) / 2 : clamp(ed.panX, 0, ed.pw - cw);
+  ed.panY = (ed.ph <= ch) ? -(ch - ed.ph) / 2 : clamp(ed.panY, 0, ed.ph - ch);
+}
+
+function ePageFrame(ctx, s, vdx, vdy) {
+  ctx.strokeStyle = 'rgba(0,0,0,.55)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5 - vdx, 0.5 - vdy, ed.pw * s, ed.ph * s);
+}
+
+/* Render asentado: pinta el viewport completo (solo la zona visible
+   de la página) desde la lista en caché del motor. */
+let settleReq = 0, settleT = 0;
+async function eSettle() {
+  if (!ed.active || !ed.pw) return;
+  const my = ++settleReq;
+  const s = eS() * ed.os;
+  const vdx = Math.round(ed.panX * s), vdy = Math.round(ed.panY * s);
+  const devW = Math.max(1, Math.round(ed.vw * ed.os)), devH = Math.max(1, Math.round(ed.vh * ed.os));
+  const px0 = Math.max(vdx, 0), py0 = Math.max(vdy, 0);
+  const px1 = Math.min(vdx + devW, Math.floor(ed.pw * s));
+  const py1 = Math.min(vdy + devH, Math.floor(ed.ph * s));
+  let r = null;
+  if (px1 > px0 && py1 > py0) {
+    r = await engine('renderRect', { key: eKey(), idx: ed.idx, scale: s, dx0: px0, dy0: py0, dx1: px1, dy1: py1 });
+  }
+  if (my !== settleReq || !ed.active) return; // hay un encuadre más nuevo en camino
+  const cv = dom.editCanvas;
+  if (cv.width !== devW || cv.height !== devH) { cv.width = devW; cv.height = devH; }
+  cv.style.width = ed.vw + 'px';
+  cv.style.height = ed.vh + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, devW, devH);
+  if (r) ctx.putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), r.x - vdx, r.y - vdy);
+  ePageFrame(ctx, s, vdx, vdy);
+  ed.base = { s: eS(), panX: ed.panX, panY: ed.panY };
+  dom.editStage.style.transform = '';
+  dom.editStage.style.width = ed.vw + 'px';
+  dom.editStage.style.height = ed.vh + 'px';
+  buildOverlay();
+  eZPctSync();
+}
+
+/* Parche: repinta solo un rectángulo fitz (la zona tocada por una operación). */
+async function eRenderPatch(fr) {
+  if (!ed.base) { await eSettle(); return; }
+  const b = ed.base;
+  const s = b.s * ed.os;
+  const vdx = Math.round(b.panX * s), vdy = Math.round(b.panY * s);
+  const dx0 = Math.max(Math.floor(fr.x0 * s), 0, vdx);
+  const dy0 = Math.max(Math.floor(fr.y0 * s), 0, vdy);
+  const dx1 = Math.min(Math.ceil(fr.x1 * s), Math.floor(ed.pw * s), vdx + dom.editCanvas.width);
+  const dy1 = Math.min(Math.ceil(fr.y1 * s), Math.floor(ed.ph * s), vdy + dom.editCanvas.height);
+  if (dx1 <= dx0 || dy1 <= dy0) return;
+  const r = await engine('renderRect', { key: eKey(), idx: ed.idx, scale: s, dx0, dy0, dx1, dy1 });
+  if (!ed.active || ed.base !== b) return; // el encuadre cambió; el asentado se ocupa
+  const ctx = dom.editCanvas.getContext('2d');
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), r.x - vdx, r.y - vdy);
+  ePageFrame(ctx, s, vdx, vdy);
+}
+
+/* Previsualización instantánea (CSS) mientras llega el render real. */
+function ePreview() {
+  const b = ed.base;
+  if (!b) return;
+  const s = eS();
+  const k = s / b.s;
+  const tx = (b.panX - ed.panX) * s;
+  const ty = (b.panY - ed.panY) * s;
+  dom.editStage.style.transform = `translate(${tx}px, ${ty}px) scale(${k})`;
+  eZPctSync();
+}
+function eScheduleSettle(ms = 140) { clearTimeout(settleT); settleT = setTimeout(eSettle, ms); }
+function eZPctSync() { dom.ezPct.textContent = Math.round(ed.zoom * 100) + ' %'; }
+
+/* --- zoom / paneo / pantalla completa --- */
+function eZoomAt(cssX, cssY, factor) {
+  const s0 = eS();
+  const fx = ed.panX + cssX / s0, fy = ed.panY + cssY / s0;
+  ed.zoom = clamp(ed.zoom * factor, 0.2, Math.min(40, 12 / ed.fit));
+  const s1 = eS();
+  ed.panX = fx - cssX / s1;
+  ed.panY = fy - cssY / s1;
+  eClampPan();
+  ePreview();
+  eScheduleSettle();
+}
+const eZoomStep = (f) => eZoomAt(ed.vw / 2, ed.vh / 2, f);
+function eFitView() { ed.zoom = 1; eClampPan(); ePreview(); eScheduleSettle(60); }
+
+function onEditWheel(e) {
+  if (!ed.active || eDrag) return;
+  e.preventDefault();
+  const r = dom.editwrap.getBoundingClientRect();
+  if (e.ctrlKey || e.metaKey) {
+    eZoomAt(e.clientX - r.left, e.clientY - r.top, Math.pow(1.0018, -e.deltaY));
+  } else {
+    const s = eS();
+    ed.panX += (e.shiftKey ? e.deltaY : e.deltaX) / s;
+    ed.panY += (e.shiftKey ? 0 : e.deltaY) / s;
+    eClampPan();
+    ePreview();
+    eScheduleSettle(110);
+  }
+}
+
+function eSpace(v) {
+  if (ed.space === v) return;
+  ed.space = v;
+  eCursorSync();
+}
+
+function eCursorSync() {
+  const c = (eDrag && eDrag.mode === 'pan') ? 'grabbing'
+    : (ed.space || ed.tool === 'pan') ? 'grab'
+    : { select: 'default', text: 'text', erase: 'crosshair', image: 'copy' }[ed.tool] || 'default';
+  dom.editOverlay.style.cursor = c;
+}
+
+function eToggleFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => { /* nada */ });
+  } else {
+    (dom.viewerSec.requestFullscreen ? dom.viewerSec.requestFullscreen() : Promise.reject())
+      .catch(() => toast('El navegador bloqueó la pantalla completa', 'err'));
+  }
+}
+
+function eOnResize() {
+  if (!ed.active || !ed.pw) return;
+  eLayout();
+  eClampPan();
+  eSettle();
+}
 
 /* --- entrada / salida del modo --- */
 async function enterEdit() {
@@ -1660,7 +1836,8 @@ async function enterEdit() {
   const src = state.sources.get(p.srcId);
 
   ed.active = true; ed.srcId = p.srcId; ed.idx = p.idx; ed.uid = p.uid;
-  ed.selImg = null; ed.dirty = false; ed.pendingImg = null; ed.pw = 0; ed.ph = 0;
+  ed.selImg = null; ed.dirty = false; ed.pendingImg = null;
+  ed.pw = 0; ed.ph = 0; ed.zoom = 1; ed.base = null; ed.space = false;
   document.body.classList.add('editing');
   dom.editbar.hidden = false;
   dom.pagebox.hidden = true;
@@ -1678,52 +1855,38 @@ async function enterEdit() {
     await engine('open', { key: eKey(), bytes }, [bytes.buffer]);
     const info = await engine('pageInfo', { key: eKey(), idx: ed.idx });
     ed.pw = info.w; ed.ph = info.h;
-    await eRender();
-    await eRefreshContent();
-    eSetStatus('Clic en un texto o una imagen para editarlo');
+    eLayout();
+    eClampPan();
+    await eSettle();
+    await eSyncContent();
+    eSetStatus('Clic en un texto o imagen · Ctrl+rueda: zoom · botón central o Espacio: mover la vista');
   });
 
-  if (!ed.pw) forceExitEdit(); // el motor no cargó
+  if (!ed.pw) forceExitEdit();
 }
 
 function forceExitEdit() {
   if (ed.srcId != null && engWorker) engine('close', { key: eKey() }).catch(() => { /* motor caído */ });
-  ed.active = false; ed.selImg = null; ed.pendingImg = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* nada */ });
+  ed.active = false; ed.selImg = null; ed.pendingImg = null; ed.base = null;
+  clearTimeout(settleT);
   document.body.classList.remove('editing');
   dom.editbar.hidden = true;
   dom.editwrap.hidden = true;
   hideTxEd();
   dom.editOverlay.textContent = '';
+  dom.editStage.style.transform = '';
   refreshAll();
 }
 
-/* --- render de la página por el motor --- */
-async function eRender() {
-  const box = dom.mat.getBoundingClientRect();
-  const os = Math.min(window.devicePixelRatio || 1, 2);
-  let fit = clamp(Math.min((box.width - 72) / ed.pw, (box.height - 72) / ed.ph), 0.05, 4);
-  fit = Math.min(fit, MAIN_CAP_PX / (Math.max(ed.pw, ed.ph) * os));
-  ed.cssScale = fit;
-  ed.scale = fit * os;
-  const r = await engine('render', { key: eKey(), idx: ed.idx, scale: ed.scale });
-  dom.editCanvas.width = r.w;
-  dom.editCanvas.height = r.h;
-  dom.editCanvas.style.width = (r.w / os) + 'px';
-  dom.editCanvas.style.height = (r.h / os) + 'px';
-  dom.editCanvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), 0, 0);
-}
-
-async function eRefreshContent() {
-  const [lt, it, u] = await Promise.all([
-    engine('textLines', { key: eKey(), idx: ed.idx }),
-    engine('images', { key: eKey(), idx: ed.idx }),
-    engine('undoState', { key: eKey() }),
-  ]);
-  ed.lines = lt.lines;
-  ed.images = it.images;
+/* --- contenido y superposición --- */
+async function eSyncContent() {
+  const r = await engine('pageContent', { key: eKey(), idx: ed.idx });
+  ed.lines = r.lines;
+  ed.images = r.images;
   ed.selImg = null;
   buildOverlay();
-  eUndoSync(u);
+  eUndoSync(r.undo);
 }
 
 function eUndoSync(u) {
@@ -1732,34 +1895,36 @@ function eUndoSync(u) {
   ed.dirty = u.canUndo;
 }
 
-async function eAfterOp() {
-  await eRender();
-  await eRefreshContent();
-}
-
 function buildOverlay() {
   const o = dom.editOverlay;
   o.textContent = '';
-  const s = ed.cssScale;
+  const b = ed.base || { s: eS(), panX: ed.panX, panY: ed.panY };
+  const lim = 260;
+  const vis = (x0, y0, x1, y1) =>
+    (x1 - b.panX) * b.s > -lim && (x0 - b.panX) * b.s < ed.vw + lim &&
+    (y1 - b.panY) * b.s > -lim && (y0 - b.panY) * b.s < ed.vh + lim;
+
   ed.lines.forEach((l, i) => {
+    if (!vis(l.x0, l.y0, l.x1, l.y1)) return;
     const d = document.createElement('div');
     d.className = 'eln';
     d.dataset.line = i;
-    d.style.left = (l.x0 * s - 2) + 'px';
-    d.style.top = (l.y0 * s - 2) + 'px';
-    d.style.width = ((l.x1 - l.x0) * s + 4) + 'px';
-    d.style.height = ((l.y1 - l.y0) * s + 4) + 'px';
+    d.style.left = ((l.x0 - b.panX) * b.s - 2) + 'px';
+    d.style.top = ((l.y0 - b.panY) * b.s - 2) + 'px';
+    d.style.width = ((l.x1 - l.x0) * b.s + 4) + 'px';
+    d.style.height = ((l.y1 - l.y0) * b.s + 4) + 'px';
     d.title = 'Clic: reescribir o borrar esta línea';
     o.appendChild(d);
   });
   ed.images.forEach((m, i) => {
+    if (!vis(m.x0, m.y0, m.x1, m.y1)) return;
     const d = document.createElement('div');
-    d.className = 'eimg';
+    d.className = 'eimg' + (ed.selImg === i ? ' sel' : '');
     d.dataset.img = i;
-    d.style.left = (m.x0 * s) + 'px';
-    d.style.top = (m.y0 * s) + 'px';
-    d.style.width = ((m.x1 - m.x0) * s) + 'px';
-    d.style.height = ((m.y1 - m.y0) * s) + 'px';
+    d.style.left = ((m.x0 - b.panX) * b.s) + 'px';
+    d.style.top = ((m.y0 - b.panY) * b.s) + 'px';
+    d.style.width = ((m.x1 - m.x0) * b.s) + 'px';
+    d.style.height = ((m.y1 - m.y0) * b.s) + 'px';
     d.title = 'Arrastra para mover · esquinas para redimensionar · Supr elimina';
     for (const c of ['nw', 'ne', 'sw', 'se']) {
       const h = document.createElement('span');
@@ -1785,8 +1950,9 @@ function setTool(t) {
     b.classList.toggle('on', b.dataset.tool === t);
   }
   dom.editwrap.classList.toggle('noedit', t !== 'select');
-  dom.editOverlay.style.cursor = { select: 'default', text: 'text', erase: 'crosshair', image: 'copy' }[t] || 'default';
-  if (t === 'select') eSetStatus('Clic en un texto o una imagen para editarlo');
+  eCursorSync();
+  if (t === 'select') eSetStatus('Clic en un texto o imagen · Ctrl+rueda: zoom · botón central o Espacio: mover la vista');
+  if (t === 'pan') eSetStatus('Arrastra para mover la vista · Ctrl+rueda para acercar y alejar');
   if (t === 'text') eSetStatus('Clic en la página donde empezará el texto nuevo');
   if (t === 'erase') eSetStatus('Arrastra un rectángulo: su contenido se eliminará del PDF');
   if (t === 'image' && !ed.pendingImg) dom.eImgFile.click();
@@ -1794,27 +1960,26 @@ function setTool(t) {
 
 /* --- editor flotante de texto --- */
 function positionTxEd(cssX, cssY) {
-  const cw = dom.editCanvas.clientWidth, chh = dom.editCanvas.clientHeight;
-  dom.txEd.style.left = clamp(cssX, 4, Math.max(4, cw - 350)) + 'px';
-  dom.txEd.style.top = clamp(cssY, 4, Math.max(4, chh - 130)) + 'px';
+  dom.txEd.style.left = clamp(cssX, 4, Math.max(4, ed.vw - 350)) + 'px';
+  dom.txEd.style.top = clamp(cssY, 4, Math.max(4, ed.vh - 130)) + 'px';
 }
 
 function openTxEd(ctx) {
   ed.txCtx = ctx;
-  const s = ed.cssScale;
+  const s = eS();
   if (ctx.mode === 'replace') {
     const l = ctx.line;
     dom.txInput.value = l.text;
     dom.txSize.value = String(Math.round(l.size * 2) / 2);
     dom.txColor.value = rgb01ToHex(l.color);
     dom.txDel.hidden = false;
-    positionTxEd(l.x0 * s, l.y1 * s + 10);
+    positionTxEd((l.x0 - ed.panX) * s, (l.y1 - ed.panY) * s + 10);
   } else {
     dom.txInput.value = '';
     dom.txSize.value = '12';
     dom.txColor.value = '#000000';
     dom.txDel.hidden = true;
-    positionTxEd(ctx.x * s, ctx.baseline * s + 10);
+    positionTxEd((ctx.x - ed.panX) * s, (ctx.baseline - ed.panY) * s + 10);
   }
   dom.txEd.hidden = false;
   dom.txInput.focus();
@@ -1834,7 +1999,7 @@ function txCommit() {
   const color = hexTo01(dom.txColor.value || '#000000');
   hideTxEd();
   eRun(async () => {
-    let r;
+    let r, patch;
     if (ctx.mode === 'replace') {
       const l = ctx.line;
       r = await engine('opReplaceText', {
@@ -1842,16 +2007,17 @@ function txCommit() {
         rect: { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 },
         baseline: l.baseline, text, size, color,
       });
+      patch = { x0: l.x0 - 4, y0: Math.min(l.y0, l.baseline - size * 1.15) - 4, x1: ed.pw, y1: Math.max(l.y1, l.baseline + size * 0.4) + 4 };
     } else {
       if (!text.trim()) return;
       r = await engine('opAddText', {
         key: eKey(), idx: ed.idx, x: ctx.x, baseline: ctx.baseline, text, size, color,
       });
+      patch = { x0: ctx.x - 4, y0: ctx.baseline - size * 1.15 - 4, x1: ed.pw, y1: ctx.baseline + size * 0.4 + 4 };
     }
-    if (r && r.dropped > 0) {
-      toast(`${r.dropped} carácter(es) sin equivalente en la fuente se sustituyeron por «?»`, 'err');
-    }
-    await eAfterOp();
+    if (r.dropped > 0) toast(`${r.dropped} carácter(es) sin equivalente en la fuente se sustituyeron por «?»`, 'err');
+    await eSyncContent();
+    await eRenderPatch(patch);
   });
 }
 
@@ -1866,29 +2032,50 @@ function txDelete() {
       rect: { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 },
       text: '', size: l.size, color: l.color,
     });
-    await eAfterOp();
+    await eSyncContent();
+    await eRenderPatch({ x0: l.x0 - 4, y0: l.y0 - 4, x1: l.x1 + 4, y1: l.y1 + 4 });
   });
 }
 
 function eDeleteSelectedImage() {
   if (ed.selImg == null) return;
-  const m = ed.images[ed.selImg];
+  const i = ed.selImg;
+  const m = ed.images[i];
   eRun(async () => {
-    await engine('opDeleteImage', { key: eKey(), idx: ed.idx, rect: { x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1 } });
-    await eAfterOp();
+    try {
+      const r = await engine('opDeleteImage', { key: eKey(), idx: ed.idx, rect: { x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1 } });
+      ed.images.splice(i, 1);
+      ed.selImg = null;
+      buildOverlay();
+      eUndoSync(r.undo);
+      await eRenderPatch({ x0: m.x0 - 4, y0: m.y0 - 4, x1: m.x1 + 4, y1: m.y1 + 4 });
+    } catch (e) {
+      toast(e?.message || 'No se pudo eliminar la imagen', 'err');
+      await eSyncContent();
+      await eSettle();
+    }
   });
 }
 
-/* --- interacción de puntero sobre la superposición --- */
+/* --- interacción de puntero --- */
 let eDrag = null;
 
 function eFitzXY(e) {
-  const r = dom.editCanvas.getBoundingClientRect();
-  return [(e.clientX - r.left) / ed.cssScale, (e.clientY - r.top) / ed.cssScale];
+  const r = dom.editwrap.getBoundingClientRect();
+  return [ed.panX + (e.clientX - r.left) / eS(), ed.panY + (e.clientY - r.top) / eS()];
 }
 
 function onEditDown(e) {
-  if (!ed.active || ed.busy || e.button !== 0) return;
+  if (!ed.active || ed.busy) return;
+
+  if (e.button === 1 || ((ed.space || ed.tool === 'pan') && e.button === 0)) {
+    eDrag = { mode: 'pan', sx: e.clientX, sy: e.clientY, panX0: ed.panX, panY0: ed.panY };
+    dom.editOverlay.setPointerCapture(e.pointerId);
+    eCursorSync();
+    e.preventDefault();
+    return;
+  }
+  if (e.button !== 0) return;
 
   if (ed.tool === 'text') {
     const [x, y] = eFitzXY(e);
@@ -1906,13 +2093,14 @@ function onEditDown(e) {
     let h = w * im.h / im.w;
     if (h > ed.ph * 0.6) { h = ed.ph * 0.6; w = h * im.w / im.h; }
     const x0 = clamp(x, 0, ed.pw - w), y0 = clamp(y, 0, ed.ph - h);
+    const rect = { x0, y0, x1: x0 + w, y1: y0 + h };
     setTool('select');
     eRun(async () => {
-      await engine('opAddImage', {
-        key: eKey(), idx: ed.idx, png: im.bytes,
-        rect: { x0, y0, x1: x0 + w, y1: y0 + h },
-      }, [im.bytes.buffer]);
-      await eAfterOp();
+      const r = await engine('opAddImage', { key: eKey(), idx: ed.idx, png: im.bytes, rect }, [im.bytes.buffer]);
+      ed.images.push(rect);
+      buildOverlay();
+      eUndoSync(r.undo);
+      await eRenderPatch({ x0: rect.x0 - 4, y0: rect.y0 - 4, x1: rect.x1 + 4, y1: rect.y1 + 4 });
     });
     return;
   }
@@ -1925,7 +2113,6 @@ function onEditDown(e) {
     return;
   }
 
-  // herramienta seleccionar
   const imgEl = e.target.closest?.('.eimg');
   if (imgEl) {
     const i = Number(imgEl.dataset.img);
@@ -1944,7 +2131,7 @@ function onEditDown(e) {
     e.preventDefault();
     return;
   }
-  if (e.target.closest?.('.eln')) return; // el click de la línea abre el editor
+  if (e.target.closest?.('.eln')) return;
 
   eSelectImg(null);
   hideTxEd();
@@ -1952,7 +2139,16 @@ function onEditDown(e) {
 
 function onEditMove(e) {
   if (!eDrag) return;
-  const s = ed.cssScale;
+  const b = ed.base || { s: eS(), panX: ed.panX, panY: ed.panY };
+
+  if (eDrag.mode === 'pan') {
+    const s = eS();
+    ed.panX = eDrag.panX0 - (e.clientX - eDrag.sx) / s;
+    ed.panY = eDrag.panY0 - (e.clientY - eDrag.sy) / s;
+    eClampPan();
+    ePreview();
+    return;
+  }
 
   if (eDrag.mode === 'marquee') {
     const [x, y] = eFitzXY(e);
@@ -1963,13 +2159,14 @@ function onEditMove(e) {
     eDrag.out = r;
     const mq = dom.marquee;
     mq.style.display = 'block';
-    mq.style.left = (r.x0 * s) + 'px';
-    mq.style.top = (r.y0 * s) + 'px';
-    mq.style.width = ((r.x1 - r.x0) * s) + 'px';
-    mq.style.height = ((r.y1 - r.y0) * s) + 'px';
+    mq.style.left = ((r.x0 - b.panX) * b.s) + 'px';
+    mq.style.top = ((r.y0 - b.panY) * b.s) + 'px';
+    mq.style.width = ((r.x1 - r.x0) * b.s) + 'px';
+    mq.style.height = ((r.y1 - r.y0) * b.s) + 'px';
     return;
   }
 
+  const s = eS();
   const dx = (e.clientX - eDrag.sx) / s;
   const dy = (e.clientY - eDrag.sy) / s;
   const o = eDrag.orig;
@@ -1997,10 +2194,10 @@ function onEditMove(e) {
   }
 
   eDrag.out = r;
-  eDrag.el.style.left = (r.x0 * s) + 'px';
-  eDrag.el.style.top = (r.y0 * s) + 'px';
-  eDrag.el.style.width = ((r.x1 - r.x0) * s) + 'px';
-  eDrag.el.style.height = ((r.y1 - r.y0) * s) + 'px';
+  eDrag.el.style.left = ((r.x0 - b.panX) * b.s) + 'px';
+  eDrag.el.style.top = ((r.y0 - b.panY) * b.s) + 'px';
+  eDrag.el.style.width = ((r.x1 - r.x0) * b.s) + 'px';
+  eDrag.el.style.height = ((r.y1 - r.y0) * b.s) + 'px';
 }
 
 function onEditUp() {
@@ -2008,13 +2205,18 @@ function onEditUp() {
   const d = eDrag;
   eDrag = null;
   dom.marquee.style.display = 'none';
+  eCursorSync();
+
+  if (d.mode === 'pan') { eSettle(); return; }
 
   if (d.mode === 'marquee') {
     const r = d.out;
     if (r && (r.x1 - r.x0) > 2 && (r.y1 - r.y0) > 2) {
       eRun(async () => {
-        await engine('opEraseArea', { key: eKey(), idx: ed.idx, rect: r, mode: 'both' });
-        await eAfterOp();
+        const res = await engine('opEraseArea', { key: eKey(), idx: ed.idx, rect: r, mode: 'both' });
+        eUndoSync(res.undo);
+        await eSyncContent();
+        await eRenderPatch({ x0: r.x0 - 4, y0: r.y0 - 4, x1: r.x1 + 4, y1: r.y1 + 4 });
       });
     }
     return;
@@ -2024,15 +2226,28 @@ function onEditUp() {
   if (!r) return;
   const moved = Math.abs(r.x0 - o.x0) + Math.abs(r.y0 - o.y0) +
                 Math.abs(r.x1 - o.x1) + Math.abs(r.y1 - o.y1);
-  if (moved < 0.75) { buildOverlay(); eSelectImg(d.i); return; } // solo fue un clic
+  if (moved < 0.75) { buildOverlay(); eSelectImg(d.i); return; }
+  ed.images[d.i] = r; // actualización optimista: la superposición ya está donde debe
   eRun(async () => {
-    await engine('opMoveImage', { key: eKey(), idx: ed.idx, rect: o, newRect: r });
-    await eAfterOp();
+    try {
+      const res = await engine('opMoveImage', { key: eKey(), idx: ed.idx, rect: o, newRect: r });
+      eUndoSync(res.undo);
+      buildOverlay();
+      eSelectImg(d.i);
+      await eRenderPatch({
+        x0: Math.min(o.x0, r.x0) - 4, y0: Math.min(o.y0, r.y0) - 4,
+        x1: Math.max(o.x1, r.x1) + 4, y1: Math.max(o.y1, r.y1) + 4,
+      });
+    } catch (e) {
+      toast(e?.message || 'No se pudo mover la imagen', 'err');
+      await eSyncContent();
+      await eSettle();
+    }
   });
 }
 
 function onEditClickLine(e) {
-  if (!ed.active || ed.busy || ed.tool !== 'select') return;
+  if (!ed.active || ed.busy || ed.tool !== 'select' || ed.space) return;
   const ln = e.target.closest?.('.eln');
   if (!ln) return;
   const l = ed.lines[Number(ln.dataset.line)];
@@ -2042,7 +2257,7 @@ function onEditClickLine(e) {
 /* --- aplicar los cambios al documento del visor --- */
 async function reloadSourceAfterEdit(srcId) {
   const src = state.sources.get(srcId);
-  const copy = new Uint8Array(src.editedBytes); // pdf.js consume su propia copia
+  const copy = new Uint8Array(src.editedBytes);
   const doc = await pdfjsLib.getDocument({
     data: copy,
     cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true,
@@ -2072,14 +2287,18 @@ async function reloadSourceAfterEdit(srcId) {
   }
 
   dom.eUndo.addEventListener('click', () => eRun(async () => {
-    await engine('undo', { key: eKey() });
+    const r = await engine('undo', { key: eKey() });
     hideTxEd();
-    await eAfterOp();
+    eUndoSync(r.undo);
+    await eSyncContent();
+    await eSettle();
   }));
   dom.eRedo.addEventListener('click', () => eRun(async () => {
-    await engine('redo', { key: eKey() });
+    const r = await engine('redo', { key: eKey() });
     hideTxEd();
-    await eAfterOp();
+    eUndoSync(r.undo);
+    await eSyncContent();
+    await eSettle();
   }));
 
   dom.eCancel.addEventListener('click', () => {
@@ -2123,6 +2342,18 @@ async function reloadSourceAfterEdit(srcId) {
     if (e.key === 'Escape') { e.preventDefault(); hideTxEd(); }
   });
 
+  dom.ezIn.addEventListener('click', () => eZoomStep(1.3));
+  dom.ezOut.addEventListener('click', () => eZoomStep(1 / 1.3));
+  dom.ezFit.addEventListener('click', eFitView);
+  dom.ezFull.addEventListener('click', eToggleFullscreen);
+  document.addEventListener('fullscreenchange', () => { if (ed.active) setTimeout(eOnResize, 60); });
+
+  window.addEventListener('keyup', (e) => {
+    if (ed.active && e.key === ' ') eSpace(false);
+  });
+  window.addEventListener('blur', () => { if (ed.active) eSpace(false); });
+
+  dom.editwrap.addEventListener('wheel', onEditWheel, { passive: false });
   dom.editOverlay.addEventListener('pointerdown', onEditDown);
   dom.editOverlay.addEventListener('pointermove', onEditMove);
   dom.editOverlay.addEventListener('pointerup', onEditUp);
@@ -2308,7 +2539,13 @@ function wire() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && ed.selImg != null) {
         e.preventDefault();
         eDeleteSelectedImage();
+        return;
       }
+      if (!typing && (e.key === '+' || e.key === '=')) { e.preventDefault(); eZoomStep(1.3); return; }
+      if (!typing && e.key === '-') { e.preventDefault(); eZoomStep(1 / 1.3); return; }
+      if (!typing && e.key === '0') { e.preventDefault(); eFitView(); return; }
+      if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) { e.preventDefault(); eToggleFullscreen(); return; }
+      if (!typing && e.key === ' ') { e.preventDefault(); eSpace(true); return; }
       return; // el resto de atajos de la app quedan en pausa
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && state.sel.size) {
@@ -2327,7 +2564,7 @@ function wire() {
     clearTimeout(rzT);
     rzT = setTimeout(() => {
       if (ed.active) {
-        if (!ed.busy && ed.pw) eRun(async () => { await eRender(); buildOverlay(); });
+        eOnResize();
       } else {
         renderMain();
       }

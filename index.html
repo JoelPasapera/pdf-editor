@@ -150,7 +150,7 @@ body.resizing{user-select:none;-webkit-user-select:none}
 }
 
 /* ---------- Visor: tapete de corte ---------- */
-.viewer{display:flex;flex-direction:column;min-width:0}
+.viewer{position:relative;display:flex;flex-direction:column;min-width:0}
 .viewerhead{
   flex:0 0 auto;
   display:flex;align-items:center;gap:10px;
@@ -164,14 +164,14 @@ body.resizing{user-select:none;-webkit-user-select:none}
 .mat{
   position:relative;flex:1;min-height:0;
   overflow:auto;
-  display:grid;place-items:center;
+  display:grid;
   padding:28px;
   background:
     repeating-linear-gradient(0deg,transparent 0 23px,var(--mat-grid) 23px 24px),
     repeating-linear-gradient(90deg,transparent 0 23px,var(--mat-grid) 23px 24px),
     var(--mat);
 }
-.pagebox{position:relative;line-height:0}
+.pagebox{position:relative;line-height:0;margin:auto}
 .pagebox canvas{
   display:block;background:#fff;
   box-shadow:0 2px 6px rgba(0,0,0,.35), 0 14px 40px rgba(0,0,0,.30);
@@ -326,10 +326,12 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
 .editwrap{position:absolute;inset:12px;overflow:hidden;line-height:0}
 #editStage{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
 .editwrap canvas{display:block;background:transparent}
-.ezoom{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:5px;z-index:8}
-.ezoom button{width:36px;height:34px;border:1px solid var(--blade-edge);border-radius:8px;background:var(--blade);color:var(--ink);font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35);line-height:1}
-.ezoom button:hover{filter:brightness(1.06)}
-.ezpct{width:36px;text-align:center;font-family:var(--font-mono);font-size:10px;color:#fff;background:rgba(31,36,40,.78);border-radius:6px;padding:4px 0}
+.zoomctl{position:absolute;right:12px;bottom:12px;display:flex;flex-direction:column;align-items:center;gap:5px;z-index:9}
+.zoomctl button{width:36px;height:34px;border:1px solid var(--blade-edge);border-radius:8px;background:var(--blade);color:var(--ink);font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35);line-height:1}
+.zoomctl button:hover{filter:brightness(1.06)}
+.ztrack{width:14px;height:112px;border-radius:7px;background:rgba(31,36,40,.78);border:1px solid rgba(0,0,0,.45);position:relative;cursor:pointer;touch-action:none}
+.zknob{position:absolute;left:50%;top:100%;transform:translate(-50%,-50%);width:24px;height:14px;border-radius:4px;background:var(--blade);border:1px solid var(--blade-edge);box-shadow:0 2px 5px rgba(0,0,0,.4);pointer-events:none}
+.ezpct{width:44px;text-align:center;font-family:var(--font-mono);font-size:10px;color:#fff;background:rgba(31,36,40,.78);border-radius:6px;padding:4px 0}
 .viewer:fullscreen{background:var(--panel)}
 .editwrap.busy{cursor:progress}
 .editwrap.busy::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.30)}
@@ -361,6 +363,9 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
 .txed input[type=number]{width:60px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-family:var(--font-mono);font-size:12px}
 .txed input[type=color]{width:32px;height:27px;padding:1px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
 .txed .fila .btn{padding:5px 10px;font-size:12px}
+.txed select{padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:#fff;cursor:pointer}
+.txtog{width:30px;height:27px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--ink)}
+.txtog.on{background:var(--blade);border-color:var(--blade-edge)}
 .txed .nota{font-size:10.5px;color:var(--muted);margin-top:7px}
 </style>
 </head>
@@ -414,6 +419,14 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
   <button class="tool on" id="eDone" type="button">✓ Hecho</button>
   <input id="eImgFile" type="file" accept="image/png,image/jpeg" hidden>
 </div>
+      <div class="zoomctl" id="zoomCtl" hidden>
+        <button id="ezFull" type="button" title="Pantalla completa (F)">⛶</button>
+        <button id="ezFit" type="button" title="Ajustar a la ventana (0)">▭</button>
+        <button id="ezIn" type="button" title="Acercar (+)">＋</button>
+        <div class="ztrack" id="zTrack" title="Arrastra el mando para acercar o alejar"><div class="zknob" id="zKnob"></div></div>
+        <button id="ezOut" type="button" title="Alejar (−)">−</button>
+        <div class="ezpct" id="ezPct">100 %</div>
+      </div>
     <div class="mat" id="mat">
       <div class="pagebox" id="pagebox" hidden>
         <canvas id="mainCanvas"></canvas>
@@ -437,15 +450,19 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
           <div id="editOverlay"></div>
           <div class="marquee" id="marquee"></div>
         </div>
-        <div class="ezoom" id="ezoom">
-          <button id="ezFull" type="button" title="Pantalla completa (F)">⛶</button>
-          <button id="ezIn" type="button" title="Acercar (+)">＋</button>
-          <div class="ezpct" id="ezPct">100 %</div>
-          <button id="ezOut" type="button" title="Alejar (−)">−</button>
-          <button id="ezFit" type="button" title="Ajustar a la ventana (0)">▭</button>
-        </div>
         <div class="txed" id="txEd" hidden>
           <input type="text" id="txInput" autocomplete="off" spellcheck="false">
+          <div class="fila">
+            <label for="txFont">Fuente</label>
+            <select id="txFont">
+              <option value="helv">Helvética</option>
+              <option value="times">Times</option>
+              <option value="cour">Courier</option>
+            </select>
+            <button class="txtog" id="txB" type="button" title="Negrita"><b>N</b></button>
+            <button class="txtog" id="txI" type="button" title="Cursiva"><i>K</i></button>
+            <button class="txtog" id="txU" type="button" title="Subrayado"><u>S</u></button>
+          </div>
           <div class="fila">
             <label for="txSize">Tamaño</label><input type="number" id="txSize" min="4" max="200" step="0.5">
             <label for="txColor">Color</label><input type="color" id="txColor" value="#000000">
@@ -453,7 +470,7 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
             <button class="btn danger" id="txDel" type="button">Borrar</button>
             <button class="btn primary" id="txSave" type="button">Guardar</button>
           </div>
-          <div class="nota" id="txNota">Fuente de escritura: Helvetica · acentos españoles compatibles</div>
+          <div class="nota" id="txNota">Fuentes base del PDF · acentos españoles compatibles</div>
         </div>
       </div>
 
@@ -655,6 +672,8 @@ const dom = {
   txEd: $('#txEd'), txInput: $('#txInput'), txSize: $('#txSize'),
   txColor: $('#txColor'), txDel: $('#txDel'), txSave: $('#txSave'),
   editStage: $('#editStage'), ezPct: $('#ezPct'), ezIn: $('#ezIn'), ezOut: $('#ezOut'), ezFit: $('#ezFit'), ezFull: $('#ezFull'),
+  zoomCtl: $('#zoomCtl'), zTrack: $('#zTrack'), zKnob: $('#zKnob'),
+  txFont: $('#txFont'), txB: $('#txB'), txI: $('#txI'), txU: $('#txU'),
   viewerSec: $('.viewer'),
 };
 const handles = [...document.querySelectorAll('.hzone,.hcorner')];
@@ -1069,6 +1088,7 @@ async function renderMain() {
     dom.empty.classList.remove('hidden');
     dom.pageInfo.textContent = 'Sin documento';
     dom.editEnter.hidden = true;
+    dom.zoomCtl.hidden = true;
     lastVis = null;
     return;
   }
@@ -1101,18 +1121,22 @@ async function renderMain() {
   const box = dom.mat.getBoundingClientRect();
   const pad = 72;
   const os = Math.min(window.devicePixelRatio || 1, 2);
-  let fit = clamp(Math.min((box.width - pad) / visW, (box.height - pad) / visH), 0.05, 4);
-  // Tope duro del lienzo interno: cortes muy pequeños no disparan la memoria
-  fit = Math.min(fit, MAIN_CAP_PX / (Math.max(vp1.width, vp1.height) * os));
-  const cssW = visW * fit, cssH = visH * fit;
+  const fit = clamp(Math.min((box.width - pad) / visW, (box.height - pad) / visH), 0.05, 4);
+  if (p.uid !== vw.uid) { vw.uid = p.uid; vw.zoom = 1; }
+  vw.fitBase = fit; vw.visW = visW; vw.visH = visH;
+  vw.zoom = clamp(vw.zoom, 0.2, Math.min(40, 12 / fit));
+  const cssScale = fit * vw.zoom;
+  // Tope duro del lienzo interno; por encima el navegador reescala (pierde algo de nitidez)
+  const bs = Math.min(cssScale * os, MAIN_CAP_PX / Math.max(vp1.width, vp1.height));
+  const cssW = visW * cssScale, cssH = visH * cssScale;
 
   dom.canvas.style.width = cssW + 'px';
   dom.canvas.style.height = cssH + 'px';
-  dom.canvas.width = Math.max(1, Math.round(cssW * os));
-  dom.canvas.height = Math.max(1, Math.round(cssH * os));
+  dom.canvas.width = Math.max(1, Math.round(visW * bs));
+  dom.canvas.height = Math.max(1, Math.round(visH * bs));
   const ctx = dom.canvas.getContext('2d');
 
-  const vp = page.getViewport({ scale: fit * os });
+  const vp = page.getViewport({ scale: bs });
 
   try {
     if (!c) {
@@ -1124,7 +1148,7 @@ async function renderMain() {
       mainTask = page.render({ canvasContext: mainOff.getContext('2d'), viewport: vp });
       await mainTask.promise;
       if (my !== mainToken) return;
-      const k = fit * os;
+      const k = bs;
       ctx.drawImage(mainOff,
         c.l * CM * k, c.t * CM * k, visW * k, visH * k,
         0, 0, dom.canvas.width, dom.canvas.height);
@@ -1135,6 +1159,8 @@ async function renderMain() {
   }
   if (my !== mainToken) return;
   overlaySync();
+  dom.zoomCtl.hidden = false;
+  zSync();
 }
 
 /* ---------- Sobrecapa de corte: cuchillas en tiempo real ---------- */
@@ -1208,6 +1234,7 @@ function syncInputsFromDraft() {
 function onHandleDown(e) {
   const p = curPage();
   if (!p || p.crop || !lastVis) return;
+  if (vw.space) return; // con Espacio se mueve la vista, no las cuchillas
   e.preventDefault();
   e.currentTarget.setPointerCapture(e.pointerId);
   hDrag = {
@@ -1608,6 +1635,136 @@ async function exportPdf() {
 }
 
 /* ============================================================
+   VISOR NORMAL — zoom, paneo y control compartido
+   El lienzo crece de verdad (las cuchillas de corte siguen
+   siendo exactas: usan proporciones reales) y el paneo usa el
+   desplazamiento nativo del tapete. La barra de zoom y la
+   pantalla completa sirven al visor y al modo edición.
+   ============================================================ */
+const vw = { zoom: 1, uid: null, fitBase: 1, visW: 1, visH: 1, space: false };
+let vwT = 0, vDrag = null;
+
+function vScheduleRender() {
+  clearTimeout(vwT);
+  vwT = setTimeout(() => { if (!ed.active) renderMain(); }, 160);
+}
+
+function vZoomTo(z, clientX, clientY) {
+  if (ed.active || !curPage()) return;
+  z = clamp(z, 0.2, Math.min(40, 12 / Math.max(vw.fitBase, 1e-4)));
+  if (Math.abs(z - vw.zoom) < 1e-4) return;
+  const mr = dom.mat.getBoundingClientRect();
+  const ax = clientX ?? (mr.left + dom.mat.clientWidth / 2);
+  const ay = clientY ?? (mr.top + dom.mat.clientHeight / 2);
+  const r = dom.canvas.getBoundingClientRect();
+  const fx = clamp((ax - r.left) / Math.max(r.width, 1), 0, 1);
+  const fy = clamp((ay - r.top) / Math.max(r.height, 1), 0, 1);
+  vw.zoom = z;
+  const s = vw.fitBase * z;
+  dom.canvas.style.width = (vw.visW * s) + 'px';
+  dom.canvas.style.height = (vw.visH * s) + 'px';
+  const r2 = dom.canvas.getBoundingClientRect();
+  dom.mat.scrollLeft += (r2.left + fx * r2.width) - ax;
+  dom.mat.scrollTop += (r2.top + fy * r2.height) - ay;
+  scheduleOverlay();
+  zSync();
+  vScheduleRender();
+}
+const vFit = () => vZoomTo(1);
+
+function vSpace(v) {
+  if (vw.space === v) return;
+  vw.space = v;
+  if (!vDrag) dom.mat.style.cursor = v ? 'grab' : '';
+}
+
+function onMatWheel(e) {
+  if (ed.active || !curPage()) return;
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    vZoomTo(vw.zoom * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY);
+  }
+  /* sin Ctrl: el desplazamiento nativo del tapete ya panea */
+}
+
+function onMatDown(e) {
+  if (ed.active || !curPage()) return;
+  if (e.button === 1 || (vw.space && e.button === 0)) {
+    vDrag = { x: e.clientX, y: e.clientY, sl: dom.mat.scrollLeft, st: dom.mat.scrollTop };
+    dom.mat.setPointerCapture(e.pointerId);
+    dom.mat.style.cursor = 'grabbing';
+    e.preventDefault();
+  }
+}
+function onMatMove(e) {
+  if (!vDrag) return;
+  dom.mat.scrollLeft = vDrag.sl - (e.clientX - vDrag.x);
+  dom.mat.scrollTop = vDrag.st - (e.clientY - vDrag.y);
+}
+function onMatUp() {
+  if (!vDrag) return;
+  vDrag = null;
+  dom.mat.style.cursor = vw.space ? 'grab' : '';
+}
+
+/* --- control compartido: barra de zoom, ajustar y pantalla completa --- */
+const Z = {
+  zoom: () => (ed.active ? ed.zoom : vw.zoom),
+  fitRef: () => (ed.active ? ed.fit : vw.fitBase),
+  max: () => Math.min(40, 12 / Math.max(Z.fitRef(), 1e-4)),
+  set(z, ax, ay) {
+    if (ed.active) eZoomAt(ax ?? ed.vw / 2, ay ?? ed.vh / 2, z / Math.max(ed.zoom, 1e-4));
+    else vZoomTo(z, ax, ay);
+  },
+  fit() { if (ed.active) eFitView(); else vFit(); },
+};
+
+function zSync() {
+  const z = Z.zoom(), zmin = 0.2, zmax = Z.max();
+  dom.ezPct.textContent = Math.round(z * 100) + ' %';
+  const t = clamp(Math.log(z / zmin) / Math.log(zmax / zmin), 0, 1);
+  dom.zKnob.style.top = ((1 - t) * 100) + '%';
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => { /* nada */ });
+  } else {
+    (dom.viewerSec.requestFullscreen ? dom.viewerSec.requestFullscreen() : Promise.reject())
+      .catch(() => toast('El navegador bloqueó la pantalla completa', 'err'));
+  }
+}
+
+(function wireViewport() {
+  let zsDrag = false;
+  const applyFromY = (cy) => {
+    const r = dom.zTrack.getBoundingClientRect();
+    const t = clamp(1 - (cy - r.top) / Math.max(r.height, 1), 0, 1);
+    Z.set(0.2 * Math.pow(Z.max() / 0.2, t));
+  };
+  dom.zTrack.addEventListener('pointerdown', (e) => {
+    zsDrag = true;
+    dom.zTrack.setPointerCapture(e.pointerId);
+    applyFromY(e.clientY);
+    e.preventDefault();
+  });
+  dom.zTrack.addEventListener('pointermove', (e) => { if (zsDrag) applyFromY(e.clientY); });
+  dom.zTrack.addEventListener('pointerup', () => { zsDrag = false; });
+  dom.zTrack.addEventListener('pointercancel', () => { zsDrag = false; });
+
+  dom.ezIn.addEventListener('click', () => Z.set(Z.zoom() * 1.3));
+  dom.ezOut.addEventListener('click', () => Z.set(Z.zoom() / 1.3));
+  dom.ezFit.addEventListener('click', () => Z.fit());
+  dom.ezFull.addEventListener('click', toggleFullscreen);
+
+  dom.mat.addEventListener('wheel', onMatWheel, { passive: false });
+  dom.mat.addEventListener('pointerdown', onMatDown);
+  dom.mat.addEventListener('pointermove', onMatMove);
+  dom.mat.addEventListener('pointerup', onMatUp);
+  dom.mat.addEventListener('pointercancel', onMatUp);
+})();
+
+/* ============================================================
    MODO EDICIÓN — edición real del contenido con motor MuPDF
    v3.1: viewport con zoom y paneo, pantalla completa, render
    parcial por parches (solo se repinta la zona tocada o visible)
@@ -1766,7 +1923,7 @@ function ePreview() {
   eZPctSync();
 }
 function eScheduleSettle(ms = 140) { clearTimeout(settleT); settleT = setTimeout(eSettle, ms); }
-function eZPctSync() { dom.ezPct.textContent = Math.round(ed.zoom * 100) + ' %'; }
+function eZPctSync() { zSync(); }
 
 /* --- zoom / paneo / pantalla completa --- */
 function eZoomAt(cssX, cssY, factor) {
@@ -1810,22 +1967,6 @@ function eCursorSync() {
     : (ed.space || ed.tool === 'pan') ? 'grab'
     : { select: 'default', text: 'text', erase: 'crosshair', image: 'copy' }[ed.tool] || 'default';
   dom.editOverlay.style.cursor = c;
-}
-
-function eToggleFullscreen() {
-  if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => { /* nada */ });
-  } else {
-    (dom.viewerSec.requestFullscreen ? dom.viewerSec.requestFullscreen() : Promise.reject())
-      .catch(() => toast('El navegador bloqueó la pantalla completa', 'err'));
-  }
-}
-
-function eOnResize() {
-  if (!ed.active || !ed.pw) return;
-  eLayout();
-  eClampPan();
-  eSettle();
 }
 
 /* --- entrada / salida del modo --- */
@@ -1959,6 +2100,49 @@ function setTool(t) {
 }
 
 /* --- editor flotante de texto --- */
+function guessStyle(name) {
+  const n = (name || '').toLowerCase();
+  return {
+    family: /times|serif|georgia|garamond|roman|book/.test(n) ? 'times'
+      : /courier|mono|consol/.test(n) ? 'cour' : 'helv',
+    bold: /bold|black|heavy|semi|demi|medium/.test(n),
+    italic: /italic|oblique/.test(n),
+    underline: false,
+  };
+}
+
+function setTxStyle(st) {
+  dom.txFont.value = st.family;
+  dom.txB.classList.toggle('on', !!st.bold);
+  dom.txI.classList.toggle('on', !!st.italic);
+  dom.txU.classList.toggle('on', !!st.underline);
+  txStyleSync();
+}
+
+function readTxStyle() {
+  return {
+    family: dom.txFont.value,
+    bold: dom.txB.classList.contains('on'),
+    italic: dom.txI.classList.contains('on'),
+    underline: dom.txU.classList.contains('on'),
+  };
+}
+
+function txStyleSync() {
+  const st = readTxStyle();
+  const fam = {
+    helv: 'Helvetica, Arial, sans-serif',
+    times: '"Times New Roman", Times, serif',
+    cour: '"Courier New", monospace',
+  }[st.family];
+  Object.assign(dom.txInput.style, {
+    fontFamily: fam,
+    fontWeight: st.bold ? '700' : '400',
+    fontStyle: st.italic ? 'italic' : 'normal',
+    textDecoration: st.underline ? 'underline' : 'none',
+  });
+}
+
 function positionTxEd(cssX, cssY) {
   dom.txEd.style.left = clamp(cssX, 4, Math.max(4, ed.vw - 350)) + 'px';
   dom.txEd.style.top = clamp(cssY, 4, Math.max(4, ed.vh - 130)) + 'px';
@@ -1972,12 +2156,14 @@ function openTxEd(ctx) {
     dom.txInput.value = l.text;
     dom.txSize.value = String(Math.round(l.size * 2) / 2);
     dom.txColor.value = rgb01ToHex(l.color);
+    setTxStyle(guessStyle(l.font));
     dom.txDel.hidden = false;
     positionTxEd((l.x0 - ed.panX) * s, (l.y1 - ed.panY) * s + 10);
   } else {
     dom.txInput.value = '';
     dom.txSize.value = '12';
     dom.txColor.value = '#000000';
+    setTxStyle({ family: 'helv', bold: false, italic: false, underline: false });
     dom.txDel.hidden = true;
     positionTxEd((ctx.x - ed.panX) * s, (ctx.baseline - ed.panY) * s + 10);
   }
@@ -1997,6 +2183,7 @@ function txCommit() {
   const text = dom.txInput.value;
   const size = clamp(parseFloat(dom.txSize.value) || 12, 4, 200);
   const color = hexTo01(dom.txColor.value || '#000000');
+  const style = readTxStyle();
   hideTxEd();
   eRun(async () => {
     let r, patch;
@@ -2005,13 +2192,13 @@ function txCommit() {
       r = await engine('opReplaceText', {
         key: eKey(), idx: ed.idx,
         rect: { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 },
-        baseline: l.baseline, text, size, color,
+        baseline: l.baseline, text, size, color, style,
       });
       patch = { x0: l.x0 - 4, y0: Math.min(l.y0, l.baseline - size * 1.15) - 4, x1: ed.pw, y1: Math.max(l.y1, l.baseline + size * 0.4) + 4 };
     } else {
       if (!text.trim()) return;
       r = await engine('opAddText', {
-        key: eKey(), idx: ed.idx, x: ctx.x, baseline: ctx.baseline, text, size, color,
+        key: eKey(), idx: ed.idx, x: ctx.x, baseline: ctx.baseline, text, size, color, style,
       });
       patch = { x0: ctx.x - 4, y0: ctx.baseline - size * 1.15 - 4, x1: ed.pw, y1: ctx.baseline + size * 0.4 + 4 };
     }
@@ -2337,21 +2524,19 @@ async function reloadSourceAfterEdit(srcId) {
 
   dom.txSave.addEventListener('click', txCommit);
   dom.txDel.addEventListener('click', txDelete);
+  dom.txFont.addEventListener('change', () => { txStyleSync(); dom.txInput.focus(); });
+  for (const el of [dom.txB, dom.txI, dom.txU]) {
+    el.addEventListener('click', () => { el.classList.toggle('on'); txStyleSync(); dom.txInput.focus(); });
+  }
   dom.txInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); txCommit(); }
     if (e.key === 'Escape') { e.preventDefault(); hideTxEd(); }
   });
 
-  dom.ezIn.addEventListener('click', () => eZoomStep(1.3));
-  dom.ezOut.addEventListener('click', () => eZoomStep(1 / 1.3));
-  dom.ezFit.addEventListener('click', eFitView);
-  dom.ezFull.addEventListener('click', eToggleFullscreen);
-  document.addEventListener('fullscreenchange', () => { if (ed.active) setTimeout(eOnResize, 60); });
-
   window.addEventListener('keyup', (e) => {
-    if (ed.active && e.key === ' ') eSpace(false);
+    if (e.key === ' ') { eSpace(false); vSpace(false); }
   });
-  window.addEventListener('blur', () => { if (ed.active) eSpace(false); });
+  window.addEventListener('blur', () => { eSpace(false); vSpace(false); });
 
   dom.editwrap.addEventListener('wheel', onEditWheel, { passive: false });
   dom.editOverlay.addEventListener('pointerdown', onEditDown);
@@ -2544,8 +2729,8 @@ function wire() {
       if (!typing && (e.key === '+' || e.key === '=')) { e.preventDefault(); eZoomStep(1.3); return; }
       if (!typing && e.key === '-') { e.preventDefault(); eZoomStep(1 / 1.3); return; }
       if (!typing && e.key === '0') { e.preventDefault(); eFitView(); return; }
-      if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) { e.preventDefault(); eToggleFullscreen(); return; }
-      if (!typing && e.key === ' ') { e.preventDefault(); eSpace(true); return; }
+      if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) { e.preventDefault(); toggleFullscreen(); return; }
+      if (!typing && tag !== 'BUTTON' && e.key === ' ') { e.preventDefault(); eSpace(true); return; }
       return; // el resto de atajos de la app quedan en pausa
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && state.sel.size) {
@@ -2556,18 +2741,20 @@ function wire() {
       e.preventDefault();
       undoAct();
     }
+    if (!typing && (e.key === '+' || e.key === '=') && curPage()) { e.preventDefault(); Z.set(Z.zoom() * 1.3); }
+    if (!typing && e.key === '-' && curPage()) { e.preventDefault(); Z.set(Z.zoom() / 1.3); }
+    if (!typing && e.key === '0' && curPage()) { e.preventDefault(); Z.fit(); }
+    if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && curPage()) { e.preventDefault(); toggleFullscreen(); }
+    if (!typing && tag !== 'BUTTON' && e.key === ' ' && curPage()) { e.preventDefault(); vSpace(true); }
   });
 
   // Reajuste del visor al cambiar el tamaño
   let rzT;
   new ResizeObserver(() => {
+    if (ed.active && ed.pw) { eLayout(); eClampPan(); ePreview(); }
     clearTimeout(rzT);
     rzT = setTimeout(() => {
-      if (ed.active) {
-        eOnResize();
-      } else {
-        renderMain();
-      }
+      if (ed.active) { eSettle(); } else { renderMain(); }
     }, 120);
   }).observe(dom.mat);
 }

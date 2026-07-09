@@ -163,7 +163,7 @@ body.resizing{user-select:none;-webkit-user-select:none}
 .viewerhead b{color:var(--ink);font-weight:600}
 .mat{
   position:relative;flex:1;min-height:0;
-  overflow:auto;
+  overflow:auto;scrollbar-gutter:stable both-edges;
   display:grid;
   padding:28px;
   background:
@@ -329,9 +329,16 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
 .zoomctl{position:absolute;right:12px;bottom:12px;display:flex;flex-direction:column;align-items:center;gap:5px;z-index:9}
 .zoomctl button{width:36px;height:34px;border:1px solid var(--blade-edge);border-radius:8px;background:var(--blade);color:var(--ink);font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35);line-height:1}
 .zoomctl button:hover{filter:brightness(1.06)}
-.ztrack{width:14px;height:112px;border-radius:7px;background:rgba(31,36,40,.78);border:1px solid rgba(0,0,0,.45);position:relative;cursor:pointer;touch-action:none}
+.ztrack{width:14px;height:150px;border-radius:7px;background:rgba(31,36,40,.78);border:1px solid rgba(0,0,0,.45);position:relative;cursor:pointer;touch-action:none}
 .zknob{position:absolute;left:50%;top:100%;transform:translate(-50%,-50%);width:24px;height:14px;border-radius:4px;background:var(--blade);border:1px solid var(--blade-edge);box-shadow:0 2px 5px rgba(0,0,0,.4);pointer-events:none}
 .ezpct{width:44px;text-align:center;font-family:var(--font-mono);font-size:10px;color:#fff;background:rgba(31,36,40,.78);border-radius:6px;padding:4px 0}
+.navarr{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:66px;z-index:9;
+  border:1px solid var(--blade-edge);border-radius:10px;background:var(--blade);color:var(--ink);
+  font-size:27px;font-weight:700;line-height:1;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.navarr:hover{filter:brightness(1.06)}
+.navarr:disabled{opacity:.35;cursor:default;filter:none}
+.navarr.prev{left:12px}
+.navarr.next{right:12px}
 .viewer:fullscreen{background:var(--panel)}
 .editwrap.busy{cursor:progress}
 .editwrap.busy::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.30)}
@@ -427,6 +434,8 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
         <button id="ezOut" type="button" title="Alejar (−)">−</button>
         <div class="ezpct" id="ezPct">100 %</div>
       </div>
+      <button class="navarr prev" id="navPrev" type="button" title="Página anterior (←)" hidden>‹</button>
+      <button class="navarr next" id="navNext" type="button" title="Página siguiente (→)" hidden>›</button>
     <div class="mat" id="mat">
       <div class="pagebox" id="pagebox" hidden>
         <canvas id="mainCanvas"></canvas>
@@ -673,6 +682,7 @@ const dom = {
   txColor: $('#txColor'), txDel: $('#txDel'), txSave: $('#txSave'),
   editStage: $('#editStage'), ezPct: $('#ezPct'), ezIn: $('#ezIn'), ezOut: $('#ezOut'), ezFit: $('#ezFit'), ezFull: $('#ezFull'),
   zoomCtl: $('#zoomCtl'), zTrack: $('#zTrack'), zKnob: $('#zKnob'),
+  navPrev: $('#navPrev'), navNext: $('#navNext'),
   txFont: $('#txFont'), txB: $('#txB'), txI: $('#txI'), txU: $('#txU'),
   viewerSec: $('.viewer'),
 };
@@ -1089,6 +1099,7 @@ async function renderMain() {
     dom.pageInfo.textContent = 'Sin documento';
     dom.editEnter.hidden = true;
     dom.zoomCtl.hidden = true;
+    dom.navPrev.hidden = dom.navNext.hidden = true;
     lastVis = null;
     return;
   }
@@ -1124,33 +1135,32 @@ async function renderMain() {
   const fit = clamp(Math.min((box.width - pad) / visW, (box.height - pad) / visH), 0.05, 4);
   if (p.uid !== vw.uid) { vw.uid = p.uid; vw.zoom = 1; }
   vw.fitBase = fit; vw.visW = visW; vw.visH = visH;
-  vw.zoom = clamp(vw.zoom, 0.2, Math.min(40, 12 / fit));
+  vw.zoom = clamp(vw.zoom, 0.25, Math.min(5, 12 / fit));
   const cssScale = fit * vw.zoom;
   // Tope duro del lienzo interno; por encima el navegador reescala (pierde algo de nitidez)
   const bs = Math.min(cssScale * os, MAIN_CAP_PX / Math.max(vp1.width, vp1.height));
   const cssW = visW * cssScale, cssH = visH * cssScale;
 
+  // Reencuadre instantáneo: la CSS estira lo ya pintado mientras llega el render nítido
   dom.canvas.style.width = cssW + 'px';
   dom.canvas.style.height = cssH + 'px';
-  dom.canvas.width = Math.max(1, Math.round(visW * bs));
-  dom.canvas.height = Math.max(1, Math.round(visH * bs));
-  const ctx = dom.canvas.getContext('2d');
 
   const vp = page.getViewport({ scale: bs });
 
   try {
+    mainOff.width = Math.max(1, Math.ceil(vp.width));
+    mainOff.height = Math.max(1, Math.ceil(vp.height));
+    mainTask = page.render({ canvasContext: mainOff.getContext('2d'), viewport: vp });
+    await mainTask.promise;
+    if (my !== mainToken) return;
+    dom.canvas.width = Math.max(1, Math.round(visW * bs));
+    dom.canvas.height = Math.max(1, Math.round(visH * bs));
+    const ctx = dom.canvas.getContext('2d');
     if (!c) {
-      mainTask = page.render({ canvasContext: ctx, viewport: vp });
-      await mainTask.promise;
+      ctx.drawImage(mainOff, 0, 0, dom.canvas.width, dom.canvas.height);
     } else {
-      mainOff.width = Math.max(1, Math.ceil(vp.width));
-      mainOff.height = Math.max(1, Math.ceil(vp.height));
-      mainTask = page.render({ canvasContext: mainOff.getContext('2d'), viewport: vp });
-      await mainTask.promise;
-      if (my !== mainToken) return;
-      const k = bs;
       ctx.drawImage(mainOff,
-        c.l * CM * k, c.t * CM * k, visW * k, visH * k,
+        c.l * CM * bs, c.t * CM * bs, visW * bs, visH * bs,
         0, 0, dom.canvas.width, dom.canvas.height);
     }
   } catch (e) {
@@ -1160,6 +1170,8 @@ async function renderMain() {
   if (my !== mainToken) return;
   overlaySync();
   dom.zoomCtl.hidden = false;
+  dom.navPrev.hidden = dom.navNext.hidden = false;
+  navSync();
   zSync();
 }
 
@@ -1641,8 +1653,8 @@ async function exportPdf() {
    desplazamiento nativo del tapete. La barra de zoom y la
    pantalla completa sirven al visor y al modo edición.
    ============================================================ */
-const vw = { zoom: 1, uid: null, fitBase: 1, visW: 1, visH: 1, space: false };
-let vwT = 0, vDrag = null;
+const vw = { zoom: 1, uid: null, fitBase: 1, visW: 1, visH: 1, space: false, gest: null, pend: null };
+let vwT = 0, vwGestT = 0, vDrag = null;
 
 function vScheduleRender() {
   clearTimeout(vwT);
@@ -1651,7 +1663,7 @@ function vScheduleRender() {
 
 function vZoomTo(z, clientX, clientY) {
   if (ed.active || !curPage()) return;
-  z = clamp(z, 0.2, Math.min(40, 12 / Math.max(vw.fitBase, 1e-4)));
+  z = clamp(z, 0.25, Math.min(5, 12 / Math.max(vw.fitBase, 1e-4)));
   if (Math.abs(z - vw.zoom) < 1e-4) return;
   const mr = dom.mat.getBoundingClientRect();
   const ax = clientX ?? (mr.left + dom.mat.clientWidth / 2);
@@ -1670,7 +1682,46 @@ function vZoomTo(z, clientX, clientY) {
   zSync();
   vScheduleRender();
 }
-const vFit = () => vZoomTo(1);
+function vFit() {
+  vw.gest = null; vw.pend = null;
+  dom.pagebox.style.transform = '';
+  dom.pagebox.style.transformOrigin = '';
+  vZoomTo(1);
+}
+
+/* Previsualización suave del zoom del visor: mientras dura el gesto
+   (mando, Ctrl+rueda) solo se transforma con CSS; al soltar o parar
+   150 ms se aplica de verdad (lienzo real, cuchillas exactas). */
+function vGestBegin(ax, ay) {
+  if (vw.gest) return;
+  const r = dom.canvas.getBoundingClientRect();
+  const ox = clamp((ax ?? (r.left + r.width / 2)) - r.left, 0, r.width);
+  const oy = clamp((ay ?? (r.top + r.height / 2)) - r.top, 0, r.height);
+  vw.gest = { z0: vw.zoom, ax: ax ?? null, ay: ay ?? null };
+  dom.pagebox.style.transformOrigin = ox + 'px ' + oy + 'px';
+}
+
+function vPreviewZoom(z, ax, ay) {
+  if (ed.active || !curPage()) return;
+  z = clamp(z, 0.25, Math.min(5, 12 / Math.max(vw.fitBase, 1e-4)));
+  vGestBegin(ax, ay);
+  vw.pend = z;
+  dom.pagebox.style.transform = 'scale(' + (z / Math.max(vw.gest.z0, 1e-4)) + ')';
+  zSync();
+  clearTimeout(vwGestT);
+  vwGestT = setTimeout(vCommitZoom, 150);
+}
+
+function vCommitZoom() {
+  clearTimeout(vwGestT);
+  const g = vw.gest;
+  if (!g) return;
+  const z = vw.pend ?? vw.zoom;
+  vw.gest = null; vw.pend = null;
+  dom.pagebox.style.transform = '';
+  dom.pagebox.style.transformOrigin = '';
+  vZoomTo(z, g.ax ?? undefined, g.ay ?? undefined);
+}
 
 function vSpace(v) {
   if (vw.space === v) return;
@@ -1682,7 +1733,7 @@ function onMatWheel(e) {
   if (ed.active || !curPage()) return;
   if (e.ctrlKey || e.metaKey) {
     e.preventDefault();
-    vZoomTo(vw.zoom * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY);
+    vPreviewZoom((vw.gest ? vw.pend : vw.zoom) * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY);
   }
   /* sin Ctrl: el desplazamiento nativo del tapete ya panea */
 }
@@ -1709,21 +1760,46 @@ function onMatUp() {
 
 /* --- control compartido: barra de zoom, ajustar y pantalla completa --- */
 const Z = {
-  zoom: () => (ed.active ? ed.zoom : vw.zoom),
+  zoom: () => (ed.active ? ed.zoom : (vw.gest ? vw.pend : vw.zoom)),
   fitRef: () => (ed.active ? ed.fit : vw.fitBase),
-  max: () => Math.min(40, 12 / Math.max(Z.fitRef(), 1e-4)),
+  min: () => (ed.active ? 0.2 : 0.25),
+  max: () => (ed.active
+    ? Math.min(40, 12 / Math.max(ed.fit, 1e-4))
+    : Math.min(5, 12 / Math.max(vw.fitBase, 1e-4))),
   set(z, ax, ay) {
     if (ed.active) eZoomAt(ax ?? ed.vw / 2, ay ?? ed.vh / 2, z / Math.max(ed.zoom, 1e-4));
-    else vZoomTo(z, ax, ay);
+    else vPreviewZoom(z, ax, ay);
   },
   fit() { if (ed.active) eFitView(); else vFit(); },
 };
 
 function zSync() {
-  const z = Z.zoom(), zmin = 0.2, zmax = Z.max();
+  const z = Z.zoom(), zmin = Z.min(), zmax = Z.max();
   dom.ezPct.textContent = Math.round(z * 100) + ' %';
   const t = clamp(Math.log(z / zmin) / Math.log(zmax / zmin), 0, 1);
   dom.zKnob.style.top = ((1 - t) * 100) + '%';
+}
+
+function navGo(dir) {
+  if (!state.pages.length) return;
+  const pos = state.curUid != null ? posOfUid(state.curUid) : 0;
+  const t = clamp(pos + dir, 0, state.pages.length - 1);
+  if (t === pos) return;
+  const uid = state.pages[t].uid;
+  state.sel = new Set([uid]);
+  state.curUid = uid;
+  state.anchorUid = uid;
+  dom.delSelBtn.disabled = false;
+  vlist.refresh();
+  vlist.scrollToUid(uid);
+  statusSync();
+  renderMain();
+}
+
+function navSync() {
+  const pos = state.curUid != null ? posOfUid(state.curUid) : -1;
+  dom.navPrev.disabled = pos <= 0;
+  dom.navNext.disabled = pos < 0 || pos >= state.pages.length - 1;
 }
 
 function toggleFullscreen() {
@@ -1740,7 +1816,8 @@ function toggleFullscreen() {
   const applyFromY = (cy) => {
     const r = dom.zTrack.getBoundingClientRect();
     const t = clamp(1 - (cy - r.top) / Math.max(r.height, 1), 0, 1);
-    Z.set(0.2 * Math.pow(Z.max() / 0.2, t));
+    const zmin = Z.min();
+    Z.set(zmin * Math.pow(Z.max() / zmin, t));
   };
   dom.zTrack.addEventListener('pointerdown', (e) => {
     zsDrag = true;
@@ -1749,8 +1826,8 @@ function toggleFullscreen() {
     e.preventDefault();
   });
   dom.zTrack.addEventListener('pointermove', (e) => { if (zsDrag) applyFromY(e.clientY); });
-  dom.zTrack.addEventListener('pointerup', () => { zsDrag = false; });
-  dom.zTrack.addEventListener('pointercancel', () => { zsDrag = false; });
+  dom.zTrack.addEventListener('pointerup', () => { zsDrag = false; if (!ed.active) vCommitZoom(); });
+  dom.zTrack.addEventListener('pointercancel', () => { zsDrag = false; if (!ed.active) vCommitZoom(); });
 
   dom.ezIn.addEventListener('click', () => Z.set(Z.zoom() * 1.3));
   dom.ezOut.addEventListener('click', () => Z.set(Z.zoom() / 1.3));
@@ -1762,6 +1839,21 @@ function toggleFullscreen() {
   dom.mat.addEventListener('pointermove', onMatMove);
   dom.mat.addEventListener('pointerup', onMatUp);
   dom.mat.addEventListener('pointercancel', onMatUp);
+
+  /* Cambio de pantalla completa: reencuadre INMEDIATO, sin esperas */
+  document.addEventListener('fullscreenchange', () => {
+    if (ed.active && ed.pw) {
+      eLayout();
+      eClampPan();
+      ePreview();
+      eSettle();
+    } else if (curPage()) {
+      renderMain();
+    }
+  });
+
+  dom.navPrev.addEventListener('click', () => { if (ed.active) eFlipPage(-1); else navGo(-1); });
+  dom.navNext.addEventListener('click', () => { if (ed.active) eFlipPage(1); else navGo(1); });
 })();
 
 /* ============================================================
@@ -1869,35 +1961,54 @@ async function eSettle() {
   const s = eS() * ed.os;
   const vdx = Math.round(ed.panX * s), vdy = Math.round(ed.panY * s);
   const devW = Math.max(1, Math.round(ed.vw * ed.os)), devH = Math.max(1, Math.round(ed.vh * ed.os));
-  const px0 = Math.max(vdx, 0), py0 = Math.max(vdy, 0);
-  const px1 = Math.min(vdx + devW, Math.floor(ed.pw * s));
-  const py1 = Math.min(vdy + devH, Math.floor(ed.ph * s));
-  let r = null;
-  if (px1 > px0 && py1 > py0) {
-    r = await engine('renderRect', { key: eKey(), idx: ed.idx, scale: s, dx0: px0, dy0: py0, dx1: px1, dy1: py1 });
-  }
-  if (my !== settleReq || !ed.active) return; // hay un encuadre más nuevo en camino
   const cv = dom.editCanvas;
-  if (cv.width !== devW || cv.height !== devH) { cv.width = devW; cv.height = devH; }
-  cv.style.width = ed.vw + 'px';
-  cv.style.height = ed.vh + 'px';
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, devW, devH);
-  if (r) ctx.putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), r.x - vdx, r.y - vdy);
-  ePageFrame(ctx, s, vdx, vdy);
-  ed.base = { s: eS(), panX: ed.panX, panY: ed.panY };
+
+  /* Reencuadre INSTANTÁNEO: sin esperar al motor, el lienzo pasa ya
+     al tamaño final reutilizando (estirado) lo que había pintado. */
+  const prev = ed.base;
+  if (prev) {
+    const k = s / (prev.s * prev.os);
+    const dx = Math.round((prev.panX - ed.panX) * s);
+    const dy = Math.round((prev.panY - ed.panY) * s);
+    if (cv.width !== devW || cv.height !== devH || Math.abs(k - 1) > 1e-6 || dx || dy) {
+      const snap = document.createElement('canvas');
+      snap.width = cv.width; snap.height = cv.height;
+      snap.getContext('2d').drawImage(cv, 0, 0);
+      cv.width = devW; cv.height = devH;
+      cv.style.width = ed.vw + 'px'; cv.style.height = ed.vh + 'px';
+      ctx.clearRect(0, 0, devW, devH);
+      ctx.drawImage(snap, dx, dy,
+        Math.max(1, Math.round(snap.width * k)), Math.max(1, Math.round(snap.height * k)));
+      ePageFrame(ctx, s, vdx, vdy);
+    }
+  } else {
+    cv.width = devW; cv.height = devH;
+    cv.style.width = ed.vw + 'px'; cv.style.height = ed.vh + 'px';
+  }
+  ed.base = { s: eS(), panX: ed.panX, panY: ed.panY, os: ed.os };
   dom.editStage.style.transform = '';
   dom.editStage.style.width = ed.vw + 'px';
   dom.editStage.style.height = ed.vh + 'px';
   buildOverlay();
-  eZPctSync();
+  zSync();
+
+  /* Render nítido de SOLO la zona visible, desde la lista en caché */
+  const px0 = Math.max(vdx, 0), py0 = Math.max(vdy, 0);
+  const px1 = Math.min(vdx + devW, Math.floor(ed.pw * s));
+  const py1 = Math.min(vdy + devH, Math.floor(ed.ph * s));
+  if (px1 <= px0 || py1 <= py0) return;
+  const r = await engine('renderRect', { key: eKey(), idx: ed.idx, scale: s, dx0: px0, dy0: py0, dx1: px1, dy1: py1 });
+  if (my !== settleReq || !ed.active) return; // llegó un encuadre más nuevo
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), r.x - vdx, r.y - vdy);
+  ePageFrame(ctx, s, vdx, vdy);
 }
 
 /* Parche: repinta solo un rectángulo fitz (la zona tocada por una operación). */
 async function eRenderPatch(fr) {
   if (!ed.base) { await eSettle(); return; }
   const b = ed.base;
-  const s = b.s * ed.os;
+  const s = b.s * b.os;
   const vdx = Math.round(b.panX * s), vdy = Math.round(b.panY * s);
   const dx0 = Math.max(Math.floor(fr.x0 * s), 0, vdx);
   const dy0 = Math.max(Math.floor(fr.y0 * s), 0, vdy);
@@ -2039,7 +2150,7 @@ function eUndoSync(u) {
 function buildOverlay() {
   const o = dom.editOverlay;
   o.textContent = '';
-  const b = ed.base || { s: eS(), panX: ed.panX, panY: ed.panY };
+  const b = ed.base || { s: eS(), panX: ed.panX, panY: ed.panY, os: ed.os };
   const lim = 260;
   const vis = (x0, y0, x1, y1) =>
     (x1 - b.panX) * b.s > -lim && (x0 - b.panX) * b.s < ed.vw + lim &&
@@ -2465,6 +2576,38 @@ async function reloadSourceAfterEdit(srcId) {
   for (const row of vlist.poolRows) { row.dataset.painted = '0'; row.dataset.uid = ''; }
 }
 
+/* Pasar de página sin salir del modo edición: si hay cambios, se
+   aplican al documento (previa confirmación) y se abre la siguiente. */
+async function eFlipPage(dir) {
+  if (!ed.active || ed.busy) return;
+  const pos = posOfUid(ed.uid);
+  const t = pos + dir;
+  if (t < 0 || t >= state.pages.length) {
+    toast(dir < 0 ? 'Ya estás en la primera página' : 'Ya estás en la última página', 'err');
+    return;
+  }
+  if (ed.dirty && !confirm('Hay cambios sin aplicar en esta página. ¿Aplicarlos y pasar de página?')) return;
+  const targetUid = state.pages[t].uid;
+  hideTxEd();
+  await eRun(async () => {
+    if (ed.dirty) {
+      eSetStatus('Aplicando cambios al documento…');
+      const r = await engine('save', { key: eKey() });
+      const src = state.sources.get(ed.srcId);
+      src.editedBytes = new Uint8Array(r.bytes);
+      await reloadSourceAfterEdit(ed.srcId);
+      toast('Edición aplicada al documento', 'ok');
+    }
+  });
+  state.sel = new Set([targetUid]);
+  state.curUid = targetUid;
+  state.anchorUid = targetUid;
+  forceExitEdit();
+  vlist.scrollToUid(targetUid);
+  statusSync();
+  await enterEdit();
+}
+
 /* --- cableado del modo edición --- */
 (function wireEdit() {
   dom.editEnter.addEventListener('click', enterEdit);
@@ -2731,6 +2874,8 @@ function wire() {
       if (!typing && e.key === '0') { e.preventDefault(); eFitView(); return; }
       if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) { e.preventDefault(); toggleFullscreen(); return; }
       if (!typing && tag !== 'BUTTON' && e.key === ' ') { e.preventDefault(); eSpace(true); return; }
+      if (!typing && e.key === 'ArrowLeft') { e.preventDefault(); eFlipPage(-1); return; }
+      if (!typing && e.key === 'ArrowRight') { e.preventDefault(); eFlipPage(1); return; }
       return; // el resto de atajos de la app quedan en pausa
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && state.sel.size) {
@@ -2746,6 +2891,8 @@ function wire() {
     if (!typing && e.key === '0' && curPage()) { e.preventDefault(); Z.fit(); }
     if (!typing && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && curPage()) { e.preventDefault(); toggleFullscreen(); }
     if (!typing && tag !== 'BUTTON' && e.key === ' ' && curPage()) { e.preventDefault(); vSpace(true); }
+    if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'ArrowLeft' && curPage()) { e.preventDefault(); navGo(-1); }
+    if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'ArrowRight' && curPage()) { e.preventDefault(); navGo(1); }
   });
 
   // Reajuste del visor al cambiar el tamaño

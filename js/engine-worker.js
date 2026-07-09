@@ -1,20 +1,27 @@
 /* ============================================================
-   GUILLOTINA · motor de edición (worker) · v3
+   GUILLOTINA · motor de edición (worker) · v3.1
    ------------------------------------------------------------
-   Envuelve MuPDF (WebAssembly) y expone operaciones de EDICIÓN
-   REAL del PDF: el contenido original se elimina del archivo
-   (redacción sin cajas negras) y el nuevo se inserta como
-   contenido nativo. Journal del motor = deshacer/rehacer.
+   Edición REAL del PDF con MuPDF WebAssembly, optimizada:
 
-   El archivo es un módulo doble:
-   - En el navegador corre como Web Worker (protocolo postMessage).
-   - En Node se importa `api` directamente para las pruebas.
+   - DisplayList por página en caché → el contenido se interpreta
+     UNA vez por estado y sirve tanto al render como a la
+     extracción de texto/imágenes (una sola pasada, no tres).
+   - Render PARCIAL recortado (DrawDevice + Pixmap con bbox):
+     el coste es proporcional a la zona visible o a la zona
+     tocada por la operación, no a la página entera.
+   - Mover/redimensionar imágenes REUTILIZA el objeto de imagen
+     comprimido del PDF (sin descodificar píxeles ni recodificar
+     PNG): coste casi nulo aunque la imagen sea enorme.
+   - Los streams de contenido se encadenan por REFERENCIA en el
+     array /Contents (sin reconstruir el contenido antiguo), con
+     aislamiento q/Q del estado gráfico original.
+   - Cada operación devuelve el estado del journal para ahorrar
+     viajes de ida y vuelta.
 
-   Espacios de coordenadas:
-   - La interfaz trabaja en espacio "fitz": origen arriba-izquierda,
-     y hacia abajo, rotación de página ya aplicada.
-   - El contenido PDF se escribe en espacio PDF (y hacia arriba);
-     la conversión usa la inversa de page.getTransform().
+   Módulo doble: Web Worker en el navegador, `api` importable en
+   Node para las pruebas. Coordenadas de la interfaz en espacio
+   fitz; el contenido se escribe en espacio PDF vía la inversa de
+   page.getTransform().
    ============================================================ */
 
 let mupdf = null;
@@ -24,18 +31,28 @@ async function ensureEngine() {
 }
 
 /* ---------- estado ---------- */
-const docs = new Map(); // key → {doc, resSeq}
+const docs = new Map(); // key → {doc, resSeq, pages:Map<idx,{page,dl}>, wrapped:Set<idx>}
 
 function getDoc(key) {
   const d = docs.get(key);
   if (!d) throw new Error('documento no abierto en el motor: ' + key);
   return d;
 }
-function loadPage(rec, idx) {
-  return rec.doc.loadPage(idx); // barato; siempre fresco tras cada operación
+
+function pageOf(rec, idx) {
+  let e = rec.pages.get(idx);
+  if (!e) {
+    const page = rec.doc.loadPage(idx);
+    e = { page, dl: page.toDisplayList() };
+    rec.pages.set(idx, e);
+  }
+  return e;
 }
 
-/* ---------- utilidades de geometría ---------- */
+/* El contenido cambió: la próxima consulta reconstruye página y lista. */
+function invalidate(rec) { rec.pages.clear(); }
+
+/* ---------- geometría ---------- */
 const invAffine = (m) => {
   const [a, b, c, d, e, f] = m;
   const det = a * d - b * c;
@@ -57,18 +74,37 @@ function escWinAnsi(s) {
   return { out, dropped };
 }
 
-function appendContent(rec, page, ops) {
+/* Encadena un stream nuevo de operadores por referencia, sin copiar
+   el contenido antiguo. El original queda aislado entre q/Q. */
+function appendContent(rec, idx, page, ops) {
+  const doc = rec.doc;
   const pageObj = page.getObject();
+  const newRef = doc.addStream(ops, null);
   const cont = pageObj.get('Contents');
-  let old = '';
-  if (cont && !cont.isNull()) {
-    if (cont.isArray()) {
-      for (let i = 0; i < cont.length; i++) old += cont.get(i).readStream().asString() + '\n';
-    } else {
-      old = cont.readStream().asString() + '\n';
-    }
+
+  if (!cont || cont.isNull()) {
+    pageObj.put('Contents', newRef);
+    rec.wrapped.add(idx);
+    return;
   }
-  pageObj.put('Contents', rec.doc.addStream(old + ops, null));
+  if (cont.isArray() && rec.wrapped.has(idx)) {
+    cont.push(newRef);
+    return;
+  }
+  const arr = doc.newArray();
+  arr.push(doc.addStream('q\n', null));
+  if (cont.isArray()) {
+    for (let i = 0; i < cont.length; i++) arr.push(cont.get(i));
+  } else if (cont.isIndirect()) {
+    arr.push(cont);
+  } else {
+    // caso raro: stream directo → se materializa una única vez
+    arr.push(doc.addStream(cont.readStream().asString(), null));
+  }
+  arr.push(doc.addStream('\nQ\n', null));
+  arr.push(newRef);
+  pageObj.put('Contents', arr);
+  rec.wrapped.add(idx);
 }
 
 function ensureRes(rec, page, group) {
@@ -104,52 +140,73 @@ function decodeColor(raw) {
   return [0, 0, 0];
 }
 
-function fitzToPdfOps(page) {
-  return invAffine(page.getTransform());
-}
-
-/* Inserta texto: (x, baselineY) en espacio fitz. */
-function insertTextOps(rec, page, x, baselineY, text, size, color) {
+function insertTextOps(rec, idx, page, x, baselineY, text, size, color) {
   const { out, dropped } = escWinAnsi(text);
-  const inv = fitzToPdfOps(page);
+  const inv = invAffine(page.getTransform());
   const [px, py] = applyM(inv, x, baselineY);
   const fontRef = rec.doc.addSimpleFont(new mupdf.Font('Helvetica'), 'Latin');
   const fonts = ensureRes(rec, page, 'Font');
   const fname = freshName(rec, fonts, 'GLF');
   fonts.put(fname, fontRef);
   const [r, g, b] = color;
-  appendContent(rec, page,
+  appendContent(rec, idx, page,
     `q BT /${fname} ${size.toFixed(2)} Tf ${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg ` +
     `1 0 0 1 ${px.toFixed(2)} ${py.toFixed(2)} Tm (${out}) Tj ET Q`);
   return dropped;
 }
 
-/* Inserta una imagen ocupando rect (espacio fitz). */
-function insertImageOps(rec, page, imgRef, rect) {
-  const inv = fitzToPdfOps(page);
-  const [ax, ay] = applyM(inv, rect.x0, rect.y1); // esquina inferior-izquierda en PDF
+function insertImageOps(rec, idx, page, imgRef, rect) {
+  const inv = invAffine(page.getTransform());
+  const [ax, ay] = applyM(inv, rect.x0, rect.y1);
   const w = rect.x1 - rect.x0, h = rect.y1 - rect.y0;
   const xob = ensureRes(rec, page, 'XObject');
   const name = freshName(rec, xob, 'GLI');
   xob.put(name, imgRef);
-  appendContent(rec, page,
+  appendContent(rec, idx, page,
     `q ${w.toFixed(2)} 0 0 ${h.toFixed(2)} ${ax.toFixed(2)} ${ay.toFixed(2)} cm /${name} Do Q`);
 }
 
-function imageBlocksOf(page) {
-  const found = [];
-  page.toStructuredText('preserve-images').walk({
+function contentOf(rec, idx) {
+  const { dl } = pageOf(rec, idx);
+  const lines = [];
+  const images = [];
+  let cur = null;
+  dl.toStructuredText('preserve-images').walk({
+    beginLine(bbox) {
+      const [x0, y0, x1, y1] = bbox;
+      cur = { x0, y0, x1, y1, text: '', size: 0, baseline: 0, color: [0, 0, 0], first: true };
+    },
+    onChar(c, origin, font, size, quad, color) {
+      if (!cur) return;
+      cur.text += c;
+      if (cur.first) {
+        cur.first = false;
+        cur.size = size || 12;
+        cur.baseline = Array.isArray(origin) ? origin[1] : (origin?.y ?? 0);
+        cur.color = decodeColor(color);
+      }
+    },
+    endLine() {
+      if (cur && cur.text.trim()) { delete cur.first; lines.push(cur); }
+      cur = null;
+    },
     onImageBlock(bbox, transform, image) {
       const [x0, y0, x1, y1] = bbox;
-      found.push({ x0, y0, x1, y1, image });
+      images.push({ x0, y0, x1, y1, _img: image });
     },
   });
-  return found;
+  return { lines, images };
 }
 
-function findImageAt(page, rect, tol = 3) {
-  const blocks = imageBlocksOf(page);
-  for (const b of blocks) {
+function undoInfo(rec) {
+  return { canUndo: rec.doc.canUndo(), canRedo: rec.doc.canRedo() };
+}
+
+const stripImg = (images) => images.map(({ x0, y0, x1, y1 }) => ({ x0, y0, x1, y1 }));
+
+function findImageAt(rec, idx, rect, tol = 3) {
+  const { images } = contentOf(rec, idx);
+  for (const b of images) {
     if (Math.abs(b.x0 - rect.x0) <= tol && Math.abs(b.y0 - rect.y0) <= tol &&
         Math.abs(b.x1 - rect.x1) <= tol && Math.abs(b.y1 - rect.y1) <= tol) return b;
   }
@@ -164,7 +221,7 @@ export const api = {
     api.close({ key });
     const doc = mupdf.PDFDocument.openDocument(bytes, 'application/pdf');
     doc.enableJournal();
-    docs.set(key, { doc, resSeq: 0 });
+    docs.set(key, { doc, resSeq: 0, pages: new Map(), wrapped: new Set() });
     return { pages: doc.countPages() };
   },
 
@@ -180,15 +237,21 @@ export const api = {
   },
 
   async pageInfo({ key, idx }) {
-    const page = loadPage(getDoc(key), idx);
+    const { page } = pageOf(getDoc(key), idx);
     const [x0, y0, x1, y1] = page.getBounds();
     return { w: x1 - x0, h: y1 - y0 };
   },
 
-  /* Render a RGBA para putImageData (fondo blanco horneado). */
-  async render({ key, idx, scale }) {
-    const page = loadPage(getDoc(key), idx);
-    const pix = page.toPixmap([scale, 0, 0, scale, 0, 0], mupdf.ColorSpace.DeviceRGB, false, false);
+  /* Render parcial: rect en píxeles de dispositivo (enteros), a la
+     escala dada. Devuelve RGBA listo para putImageData. */
+  async renderRect({ key, idx, dx0, dy0, dx1, dy1, scale }) {
+    const rec = getDoc(key);
+    const { dl } = pageOf(rec, idx);
+    const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [dx0, dy0, dx1, dy1], false);
+    pix.clear(255);
+    const dev = new mupdf.DrawDevice([scale, 0, 0, scale, 0, 0], pix);
+    dl.run(dev, [1, 0, 0, 1, 0, 0]);
+    dev.close();
     const src = pix.getPixels();
     const w = pix.getWidth(), h = pix.getHeight();
     const stride = pix.getStride(), n = pix.getNumberOfComponents();
@@ -202,61 +265,32 @@ export const api = {
         out[di + 3] = 255;
       }
     }
-    return { w, h, buf: out.buffer, _transfer: [out.buffer] };
+    return { x: dx0, y: dy0, w, h, buf: out.buffer, _transfer: [out.buffer] };
   },
 
-  /* Líneas de texto con métrica para el editor. */
-  async textLines({ key, idx }) {
-    const page = loadPage(getDoc(key), idx);
-    const lines = [];
-    let cur = null;
-    page.toStructuredText().walk({
-      beginLine(bbox) {
-        const [x0, y0, x1, y1] = bbox;
-        cur = { x0, y0, x1, y1, text: '', size: 0, baseline: 0, color: [0, 0, 0], first: true };
-      },
-      onChar(c, origin, font, size, quad, color) {
-        if (!cur) return;
-        cur.text += c;
-        if (cur.first) {
-          cur.first = false;
-          cur.size = size || 12;
-          cur.baseline = Array.isArray(origin) ? origin[1] : (origin?.y ?? 0);
-          cur.color = decodeColor(color);
-        }
-      },
-      endLine() {
-        if (cur && cur.text.trim()) {
-          delete cur.first;
-          lines.push(cur);
-        }
-        cur = null;
-      },
-    });
-    return { lines };
+  /* Texto + imágenes + journal en UNA pasada y UN viaje. */
+  async pageContent({ key, idx }) {
+    const rec = getDoc(key);
+    const { lines, images } = contentOf(rec, idx);
+    return { lines, images: stripImg(images), undo: undoInfo(rec) };
   },
 
-  async images({ key, idx }) {
-    const page = loadPage(getDoc(key), idx);
-    return { images: imageBlocksOf(page).map(({ x0, y0, x1, y1 }) => ({ x0, y0, x1, y1 })) };
-  },
-
-  /* --- operaciones de edición (cada una = 1 paso del journal) --- */
+  /* --- operaciones (cada una = 1 paso del journal) --- */
 
   async opReplaceText({ key, idx, rect, text, size, color, baseline }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('reemplazar texto');
     let dropped = 0;
     try {
-      const page = loadPage(rec, idx);
+      const page = rec.doc.loadPage(idx);
       redactRect(page, { x0: rect.x0 - 0.5, y0: rect.y0 - 0.5, x1: rect.x1 + 0.5, y1: rect.y1 + 0.5 },
         mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_TEXT_REMOVE);
       if (text && text.length) {
-        dropped = insertTextOps(rec, page, rect.x0,
+        dropped = insertTextOps(rec, idx, page, rect.x0,
           baseline ?? (rect.y1 - (rect.y1 - rect.y0) * 0.22), text, size, color);
       }
-    } finally { rec.doc.endOperation(); }
-    return { dropped };
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { dropped, undo: undoInfo(rec) };
   },
 
   async opAddText({ key, idx, x, baseline, text, size, color }) {
@@ -264,73 +298,83 @@ export const api = {
     rec.doc.beginOperation('añadir texto');
     let dropped = 0;
     try {
-      dropped = insertTextOps(rec, loadPage(rec, idx), x, baseline, text, size, color);
-    } finally { rec.doc.endOperation(); }
-    return { dropped };
+      dropped = insertTextOps(rec, idx, rec.doc.loadPage(idx), x, baseline, text, size, color);
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { dropped, undo: undoInfo(rec) };
   },
 
   async opEraseArea({ key, idx, rect, mode }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('borrar zona');
     try {
-      const page = loadPage(rec, idx);
       const img = (mode === 'text') ? mupdf.PDFPage.REDACT_IMAGE_NONE : mupdf.PDFPage.REDACT_IMAGE_REMOVE;
       const txt = (mode === 'image') ? mupdf.PDFPage.REDACT_TEXT_NONE : mupdf.PDFPage.REDACT_TEXT_REMOVE;
-      redactRect(page, rect, img, txt);
-    } finally { rec.doc.endOperation(); }
-    return {};
+      redactRect(rec.doc.loadPage(idx), rect, img, txt);
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { undo: undoInfo(rec) };
   },
 
+  /* Mover/redimensionar: REUTILIZA el objeto comprimido de la imagen
+     (sin descodificar píxeles). Si el motor no puede, cae al camino
+     PNG clásico. */
   async opMoveImage({ key, idx, rect, newRect }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('mover imagen');
     try {
-      const page = loadPage(rec, idx);
-      const blk = findImageAt(page, rect);
+      const blk = findImageAt(rec, idx, rect);
       if (!blk) throw new Error('la imagen ya no está en esa posición');
-      const png = blk.image.toPixmap().asPNG();
+      let imgRef;
+      try {
+        imgRef = rec.doc.addImage(blk._img);
+      } catch {
+        imgRef = rec.doc.addImage(new mupdf.Image(blk._img.toPixmap().asPNG()));
+      }
+      const page = rec.doc.loadPage(idx);
       redactRect(page, { x0: blk.x0 - 0.5, y0: blk.y0 - 0.5, x1: blk.x1 + 0.5, y1: blk.y1 + 0.5 },
         mupdf.PDFPage.REDACT_IMAGE_REMOVE, mupdf.PDFPage.REDACT_TEXT_NONE);
-      const page2 = loadPage(rec, idx);
-      insertImageOps(rec, page2, rec.doc.addImage(new mupdf.Image(png)), newRect);
-    } finally { rec.doc.endOperation(); }
-    return {};
+      insertImageOps(rec, idx, rec.doc.loadPage(idx), imgRef, newRect);
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { undo: undoInfo(rec) };
   },
 
   async opDeleteImage({ key, idx, rect }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('eliminar imagen');
     try {
-      const page = loadPage(rec, idx);
-      const blk = findImageAt(page, rect) || rect;
-      redactRect(page, { x0: blk.x0 - 0.5, y0: blk.y0 - 0.5, x1: blk.x1 + 0.5, y1: blk.y1 + 0.5 },
+      const blk = findImageAt(rec, idx, rect) || rect;
+      redactRect(rec.doc.loadPage(idx),
+        { x0: blk.x0 - 0.5, y0: blk.y0 - 0.5, x1: blk.x1 + 0.5, y1: blk.y1 + 0.5 },
         mupdf.PDFPage.REDACT_IMAGE_REMOVE, mupdf.PDFPage.REDACT_TEXT_NONE);
-    } finally { rec.doc.endOperation(); }
-    return {};
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { undo: undoInfo(rec) };
   },
 
   async opAddImage({ key, idx, png, rect }) {
     const rec = getDoc(key);
     rec.doc.beginOperation('añadir imagen');
     try {
-      const page = loadPage(rec, idx);
-      insertImageOps(rec, page, rec.doc.addImage(new mupdf.Image(png)), rect);
-    } finally { rec.doc.endOperation(); }
-    return {};
+      insertImageOps(rec, idx, rec.doc.loadPage(idx), rec.doc.addImage(new mupdf.Image(png)), rect);
+    } finally { rec.doc.endOperation(); invalidate(rec); }
+    return { undo: undoInfo(rec) };
   },
 
   /* --- journal --- */
-  undoState({ key }) {
+  undoState({ key }) { return { undo: undoInfo(getDoc(key)) }; },
+  undo({ key }) {
     const rec = getDoc(key);
-    return { canUndo: rec.doc.canUndo(), canRedo: rec.doc.canRedo() };
+    if (rec.doc.canUndo()) { rec.doc.undo(); invalidate(rec); rec.wrapped.clear(); }
+    return { undo: undoInfo(rec) };
   },
-  undo({ key }) { const rec = getDoc(key); if (rec.doc.canUndo()) rec.doc.undo(); return api.undoState({ key }); },
-  redo({ key }) { const rec = getDoc(key); if (rec.doc.canRedo()) rec.doc.redo(); return api.undoState({ key }); },
+  redo({ key }) {
+    const rec = getDoc(key);
+    if (rec.doc.canRedo()) { rec.doc.redo(); invalidate(rec); rec.wrapped.clear(); }
+    return { undo: undoInfo(rec) };
+  },
 
   async save({ key }) {
     const rec = getDoc(key);
     const buf = rec.doc.saveToBuffer('').asUint8Array();
-    const bytes = new Uint8Array(buf); // copia propia, fuera de la memoria WASM
+    const bytes = new Uint8Array(buf);
     return { bytes: bytes.buffer, _transfer: [bytes.buffer] };
   },
 };

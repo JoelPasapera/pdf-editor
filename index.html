@@ -4,14 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Guillotina — Procesador de PDF</title>
-<meta name="description" content="Recorta, redimensiona a A4, elimina, reordena y une PDFs. Todo se procesa en tu navegador.">
+<meta name="description" content="Edita el contenido, recorta, redimensiona a A4, elimina, reordena y une PDFs. Todo se procesa en tu navegador.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f5b301'/%3E%3Cpath d='M7 22 25 8' stroke='%231f2428' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 /* ============================================================
-   GUILLOTINA · Procesador de PDF · v2
+   GUILLOTINA · Procesador de PDF · v3
    Diseño: banco de corte de imprenta — chapa de acero clara,
    tapete de corte verde, cuchillas amarillas de seguridad.
    ============================================================ */
@@ -300,6 +300,61 @@ body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
 .toast.ok{background:var(--ok)}
 @keyframes pop{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .hidden{display:none!important}
+[hidden]{display:none!important}
+
+/* ---------- Modo edición (motor de edición real) ---------- */
+.viewerhead .vspacer{flex:1}
+.btn.mini{padding:5px 10px;font-size:12px}
+.editbar{
+  flex:0 0 auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:8px 16px;border-bottom:1px solid var(--line);
+  background:#fdf3d8;
+}
+.editbar .tool{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:6px 11px;border:1px solid var(--line);border-radius:7px;
+  background:#fff;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;
+}
+.editbar .tool:hover{border-color:#b9c2be}
+.editbar .tool:disabled{opacity:.45;cursor:not-allowed}
+.editbar .tool.on{background:var(--blade);border-color:#d99f00}
+.editbar .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.editbar .estado{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-left:4px}
+.editbar .spacer{flex:1}
+body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:saturate(.5)}
+.editwrap{position:relative;line-height:0}
+.editwrap canvas{display:block;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.35), 0 14px 40px rgba(0,0,0,.30)}
+.editwrap.busy{cursor:progress}
+.editwrap.busy::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.30)}
+#editOverlay{position:absolute;inset:0}
+.editwrap.noedit .eln,.editwrap.noedit .eimg{pointer-events:none}
+.eln{position:absolute;border:1px dashed transparent;cursor:text;border-radius:2px}
+.eln:hover{border-color:var(--blade);background:rgba(245,179,1,.10)}
+.eimg{position:absolute;border:1.5px dashed transparent;cursor:move}
+.eimg:hover{border-color:var(--blade)}
+.eimg.sel{border-style:solid;border-color:var(--blade);background:rgba(245,179,1,.08)}
+.eimg .eh{position:absolute;width:11px;height:11px;background:var(--blade);
+  border:1px solid var(--blade-edge);border-radius:2px;display:none}
+.eimg.sel .eh{display:block}
+.eh.nw{left:-6px;top:-6px;cursor:nwse-resize}
+.eh.ne{right:-6px;top:-6px;cursor:nesw-resize}
+.eh.sw{left:-6px;bottom:-6px;cursor:nesw-resize}
+.eh.se{right:-6px;bottom:-6px;cursor:nwse-resize}
+.marquee{position:absolute;border:1.5px dashed var(--danger);background:rgba(196,68,42,.12);display:none;pointer-events:none}
+.txed{
+  position:absolute;z-index:6;background:#fff;border:1px solid var(--ink);
+  border-radius:9px;box-shadow:var(--shadow);padding:9px;width:min(340px,90%);line-height:1.3;
+}
+.txed input[type=text]{
+  width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
+  font-family:var(--font-mono);font-size:13px;
+}
+.txed .fila{display:flex;gap:6px;align-items:center;margin-top:7px}
+.txed .fila label{font-size:11px;color:var(--muted)}
+.txed input[type=number]{width:60px;padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-family:var(--font-mono);font-size:12px}
+.txed input[type=color]{width:32px;height:27px;padding:1px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
+.txed .fila .btn{padding:5px 10px;font-size:12px}
+.txed .nota{font-size:10.5px;color:var(--muted);margin-top:7px}
 </style>
 </head>
 <body>
@@ -335,7 +390,22 @@ body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
 
   <!-- Tapete de corte -->
   <section class="viewer">
-    <div class="viewerhead" id="pageInfo">Sin documento</div>
+    <div class="viewerhead"><span id="pageInfo">Sin documento</span><span class="vspacer"></span><button id="editEnter" class="btn mini" type="button" hidden>✎ Editar contenido</button></div>
+
+<div class="editbar" id="editbar" hidden>
+  <button class="tool on" id="etSel" type="button" data-tool="select">Seleccionar</button>
+  <button class="tool" id="etText" type="button" data-tool="text">+ Texto</button>
+  <button class="tool" id="etImg" type="button" data-tool="image">+ Imagen</button>
+  <button class="tool" id="etErase" type="button" data-tool="erase">Borrar zona</button>
+  <span class="sep"></span>
+  <button class="tool" id="eUndo" type="button" disabled>↶ Deshacer</button>
+  <button class="tool" id="eRedo" type="button" disabled>↷ Rehacer</button>
+  <span class="estado" id="eStatus"></span>
+  <span class="spacer"></span>
+  <button class="tool" id="eCancel" type="button">Cancelar</button>
+  <button class="tool on" id="eDone" type="button">✓ Hecho</button>
+  <input id="eImgFile" type="file" accept="image/png,image/jpeg" hidden>
+</div>
     <div class="mat" id="mat">
       <div class="pagebox" id="pagebox" hidden>
         <canvas id="mainCanvas"></canvas>
@@ -353,6 +423,23 @@ body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
         <div class="hcorner sw" data-h="sw" aria-hidden="true"></div>
         <div class="hcorner se" data-h="se" aria-hidden="true"></div>
       </div>
+      <div class="editwrap" id="editwrap" hidden>
+        <canvas id="editCanvas"></canvas>
+        <div id="editOverlay"></div>
+        <div class="marquee" id="marquee"></div>
+        <div class="txed" id="txEd" hidden>
+          <input type="text" id="txInput" autocomplete="off" spellcheck="false">
+          <div class="fila">
+            <label for="txSize">Tamaño</label><input type="number" id="txSize" min="4" max="200" step="0.5">
+            <label for="txColor">Color</label><input type="color" id="txColor" value="#000000">
+            <span style="flex:1"></span>
+            <button class="btn danger" id="txDel" type="button">Borrar</button>
+            <button class="btn primary" id="txSave" type="button">Guardar</button>
+          </div>
+          <div class="nota" id="txNota">Fuente de escritura: Helvetica · acentos españoles compatibles</div>
+        </div>
+      </div>
+
       <div class="empty" id="emptyState">
         <div class="card">
           <h2>Arrastra tus PDF aquí</h2>
@@ -441,7 +528,7 @@ body.dropping .mat{outline:3px dashed var(--blade);outline-offset:-10px}
 <script>
 'use strict';
 /* ============================================================
-   GUILLOTINA · lógica de la aplicación · v2
+   GUILLOTINA · lógica de la aplicación · v3
    ------------------------------------------------------------
    Reglas de arquitectura (críticas para el rendimiento):
 
@@ -544,6 +631,12 @@ const dom = {
   delRange: $('#delRange'), delRangeBtn: $('#delRangeBtn'), delSelBtn: $('#delSelBtn'),
   moveFrom: $('#moveFrom'), moveTo: $('#moveTo'), moveBtn: $('#moveBtn'),
   statusText: $('#statusText'), toasts: $('#toasts'),
+  editEnter: $('#editEnter'), editbar: $('#editbar'), editwrap: $('#editwrap'),
+  editCanvas: $('#editCanvas'), editOverlay: $('#editOverlay'), marquee: $('#marquee'),
+  eStatus: $('#eStatus'), eUndo: $('#eUndo'), eRedo: $('#eRedo'),
+  eCancel: $('#eCancel'), eDone: $('#eDone'), eImgFile: $('#eImgFile'),
+  txEd: $('#txEd'), txInput: $('#txInput'), txSize: $('#txSize'),
+  txColor: $('#txColor'), txDel: $('#txDel'), txSave: $('#txSave'),
 };
 const handles = [...document.querySelectorAll('.hzone,.hcorner')];
 
@@ -645,7 +738,7 @@ async function addFiles(fileList) {
         standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
       }).promise;
       const id = ++state.srcSeq;
-      state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map() });
+      state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map(), editedBytes: null });
       for (let i = 0; i < doc.numPages; i++) {
         fresh.push({ uid: ++state.uidSeq, srcId: id, idx: i, crop: null });
       }
@@ -680,8 +773,12 @@ async function sourceBytes(srcId, cache) {
   let b = cache.get(srcId);
   if (!b) {
     const src = state.sources.get(srcId);
-    try { b = await src.file.arrayBuffer(); }
-    catch { throw new Error(`No se pudo releer «${src.name}» del disco (¿se movió o eliminó?)`); }
+    if (src.editedBytes) {
+      b = src.editedBytes; // versión con ediciones de contenido aplicadas
+    } else {
+      try { b = await src.file.arrayBuffer(); }
+      catch { throw new Error(`No se pudo releer «${src.name}» del disco (¿se movió o eliminó?)`); }
+    }
     cache.set(srcId, b);
   }
   return b;
@@ -943,6 +1040,7 @@ let lastVis = null; // {w,h} en puntos visuales de la página actual SIN corte
 const mainOff = document.createElement('canvas'); // reutilizado entre renders
 
 async function renderMain() {
+  if (ed.active) return; // el modo edición gobierna el tapete
   const my = ++mainToken;
   try { mainTask?.cancel(); } catch { /* sin tarea activa */ }
   const p = curPage();
@@ -951,11 +1049,13 @@ async function renderMain() {
     dom.pagebox.hidden = true;
     dom.empty.classList.remove('hidden');
     dom.pageInfo.textContent = 'Sin documento';
+    dom.editEnter.hidden = true;
     lastVis = null;
     return;
   }
   dom.empty.classList.add('hidden');
   dom.pagebox.hidden = false;
+  dom.editEnter.hidden = false;
 
   const src = state.sources.get(p.srcId);
   let page;
@@ -1032,6 +1132,7 @@ function scheduleOverlay() {
 }
 
 function overlaySync() {
+  if (ed.active) return;
   const p = curPage();
   const show = !!p && !p.crop && !!lastVis;
   const parts = [dom.covT, dom.covB, dom.covL, dom.covR, dom.frame, ...handles];
@@ -1487,10 +1588,554 @@ async function exportPdf() {
   }
 }
 
+/* ============================================================
+   MODO EDICIÓN — edición real del contenido con motor MuPDF
+   El contenido original se ELIMINA del archivo (no se tapa) y el
+   nuevo se inserta como contenido nativo. El worker vive en
+   js/engine-worker.js y el motor en vendor/mupdf/ (local).
+   ============================================================ */
+const ed = {
+  active: false, srcId: null, idx: 0, uid: null,
+  tool: 'select', scale: 1, cssScale: 1, pw: 0, ph: 0,
+  lines: [], images: [], selImg: null,
+  dirty: false, busy: false, pendingImg: null, txCtx: null,
+};
+
+/* --- cliente RPC del worker del motor --- */
+let engWorker = null, engSeq = 0;
+const engPending = new Map();
+
+function engine(cmd, args, transfer) {
+  return new Promise((resolve, reject) => {
+    if (!engWorker) {
+      try {
+        engWorker = new Worker('./js/engine-worker.js', { type: 'module' });
+      } catch {
+        reject(new Error('No se pudo iniciar el motor de edición'));
+        return;
+      }
+      engWorker.onmessage = (ev) => {
+        const { id, ok, res, err } = ev.data || {};
+        const p = engPending.get(id);
+        if (!p) return;
+        engPending.delete(id);
+        ok ? p.resolve(res) : p.reject(new Error(err || 'error del motor'));
+      };
+      engWorker.onerror = () => {
+        const err = new Error('El motor de edición no cargó. Comprueba que existen js/engine-worker.js y vendor/mupdf/, y que sirves la app por http (npx serve), no con file://');
+        for (const p of engPending.values()) p.reject(err);
+        engPending.clear();
+        try { engWorker.terminate(); } catch { /* nada */ }
+        engWorker = null; // permite reintentar
+      };
+    }
+    const id = ++engSeq;
+    engPending.set(id, { resolve, reject });
+    engWorker.postMessage({ id, cmd, args: args || {} }, transfer || []);
+  });
+}
+
+async function eRun(fn) {
+  if (ed.busy) return;
+  ed.busy = true;
+  dom.editwrap.classList.add('busy');
+  try { await fn(); }
+  catch (e) { toast(e?.message || 'Error de edición', 'err'); }
+  finally {
+    ed.busy = false;
+    dom.editwrap.classList.remove('busy');
+  }
+}
+
+const eKey = () => 'S' + ed.srcId;
+const eSetStatus = (t) => { dom.eStatus.textContent = t; };
+const rgb01ToHex = (c) => '#' + c.map((v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0')).join('');
+const hexTo01 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+
+/* --- entrada / salida del modo --- */
+async function enterEdit() {
+  const p = curPage();
+  if (!p || ed.active) return;
+  if (p.crop) { toast('Esta página tiene un corte pendiente. Quítalo antes de editar el contenido.', 'err'); return; }
+  const src = state.sources.get(p.srcId);
+
+  ed.active = true; ed.srcId = p.srcId; ed.idx = p.idx; ed.uid = p.uid;
+  ed.selImg = null; ed.dirty = false; ed.pendingImg = null; ed.pw = 0; ed.ph = 0;
+  document.body.classList.add('editing');
+  dom.editbar.hidden = false;
+  dom.pagebox.hidden = true;
+  dom.empty.classList.add('hidden');
+  dom.editwrap.hidden = false;
+  dom.editEnter.hidden = true;
+  hideTxEd();
+  setTool('select');
+  eSetStatus('Cargando motor de edición…');
+
+  await eRun(async () => {
+    const bytes = src.editedBytes
+      ? new Uint8Array(src.editedBytes)
+      : new Uint8Array(await src.file.arrayBuffer());
+    await engine('open', { key: eKey(), bytes }, [bytes.buffer]);
+    const info = await engine('pageInfo', { key: eKey(), idx: ed.idx });
+    ed.pw = info.w; ed.ph = info.h;
+    await eRender();
+    await eRefreshContent();
+    eSetStatus('Clic en un texto o una imagen para editarlo');
+  });
+
+  if (!ed.pw) forceExitEdit(); // el motor no cargó
+}
+
+function forceExitEdit() {
+  if (ed.srcId != null && engWorker) engine('close', { key: eKey() }).catch(() => { /* motor caído */ });
+  ed.active = false; ed.selImg = null; ed.pendingImg = null;
+  document.body.classList.remove('editing');
+  dom.editbar.hidden = true;
+  dom.editwrap.hidden = true;
+  hideTxEd();
+  dom.editOverlay.textContent = '';
+  refreshAll();
+}
+
+/* --- render de la página por el motor --- */
+async function eRender() {
+  const box = dom.mat.getBoundingClientRect();
+  const os = Math.min(window.devicePixelRatio || 1, 2);
+  let fit = clamp(Math.min((box.width - 72) / ed.pw, (box.height - 72) / ed.ph), 0.05, 4);
+  fit = Math.min(fit, MAIN_CAP_PX / (Math.max(ed.pw, ed.ph) * os));
+  ed.cssScale = fit;
+  ed.scale = fit * os;
+  const r = await engine('render', { key: eKey(), idx: ed.idx, scale: ed.scale });
+  dom.editCanvas.width = r.w;
+  dom.editCanvas.height = r.h;
+  dom.editCanvas.style.width = (r.w / os) + 'px';
+  dom.editCanvas.style.height = (r.h / os) + 'px';
+  dom.editCanvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buf), r.w, r.h), 0, 0);
+}
+
+async function eRefreshContent() {
+  const [lt, it, u] = await Promise.all([
+    engine('textLines', { key: eKey(), idx: ed.idx }),
+    engine('images', { key: eKey(), idx: ed.idx }),
+    engine('undoState', { key: eKey() }),
+  ]);
+  ed.lines = lt.lines;
+  ed.images = it.images;
+  ed.selImg = null;
+  buildOverlay();
+  eUndoSync(u);
+}
+
+function eUndoSync(u) {
+  dom.eUndo.disabled = !u.canUndo;
+  dom.eRedo.disabled = !u.canRedo;
+  ed.dirty = u.canUndo;
+}
+
+async function eAfterOp() {
+  await eRender();
+  await eRefreshContent();
+}
+
+function buildOverlay() {
+  const o = dom.editOverlay;
+  o.textContent = '';
+  const s = ed.cssScale;
+  ed.lines.forEach((l, i) => {
+    const d = document.createElement('div');
+    d.className = 'eln';
+    d.dataset.line = i;
+    d.style.left = (l.x0 * s - 2) + 'px';
+    d.style.top = (l.y0 * s - 2) + 'px';
+    d.style.width = ((l.x1 - l.x0) * s + 4) + 'px';
+    d.style.height = ((l.y1 - l.y0) * s + 4) + 'px';
+    d.title = 'Clic: reescribir o borrar esta línea';
+    o.appendChild(d);
+  });
+  ed.images.forEach((m, i) => {
+    const d = document.createElement('div');
+    d.className = 'eimg';
+    d.dataset.img = i;
+    d.style.left = (m.x0 * s) + 'px';
+    d.style.top = (m.y0 * s) + 'px';
+    d.style.width = ((m.x1 - m.x0) * s) + 'px';
+    d.style.height = ((m.y1 - m.y0) * s) + 'px';
+    d.title = 'Arrastra para mover · esquinas para redimensionar · Supr elimina';
+    for (const c of ['nw', 'ne', 'sw', 'se']) {
+      const h = document.createElement('span');
+      h.className = 'eh ' + c;
+      h.dataset.cor = c;
+      d.appendChild(h);
+    }
+    o.appendChild(d);
+  });
+}
+
+function eSelectImg(i) {
+  ed.selImg = i;
+  for (const el of dom.editOverlay.querySelectorAll('.eimg')) {
+    el.classList.toggle('sel', Number(el.dataset.img) === i);
+  }
+}
+
+/* --- herramientas --- */
+function setTool(t) {
+  ed.tool = t;
+  for (const b of dom.editbar.querySelectorAll('[data-tool]')) {
+    b.classList.toggle('on', b.dataset.tool === t);
+  }
+  dom.editwrap.classList.toggle('noedit', t !== 'select');
+  dom.editOverlay.style.cursor = { select: 'default', text: 'text', erase: 'crosshair', image: 'copy' }[t] || 'default';
+  if (t === 'select') eSetStatus('Clic en un texto o una imagen para editarlo');
+  if (t === 'text') eSetStatus('Clic en la página donde empezará el texto nuevo');
+  if (t === 'erase') eSetStatus('Arrastra un rectángulo: su contenido se eliminará del PDF');
+  if (t === 'image' && !ed.pendingImg) dom.eImgFile.click();
+}
+
+/* --- editor flotante de texto --- */
+function positionTxEd(cssX, cssY) {
+  const cw = dom.editCanvas.clientWidth, chh = dom.editCanvas.clientHeight;
+  dom.txEd.style.left = clamp(cssX, 4, Math.max(4, cw - 350)) + 'px';
+  dom.txEd.style.top = clamp(cssY, 4, Math.max(4, chh - 130)) + 'px';
+}
+
+function openTxEd(ctx) {
+  ed.txCtx = ctx;
+  const s = ed.cssScale;
+  if (ctx.mode === 'replace') {
+    const l = ctx.line;
+    dom.txInput.value = l.text;
+    dom.txSize.value = String(Math.round(l.size * 2) / 2);
+    dom.txColor.value = rgb01ToHex(l.color);
+    dom.txDel.hidden = false;
+    positionTxEd(l.x0 * s, l.y1 * s + 10);
+  } else {
+    dom.txInput.value = '';
+    dom.txSize.value = '12';
+    dom.txColor.value = '#000000';
+    dom.txDel.hidden = true;
+    positionTxEd(ctx.x * s, ctx.baseline * s + 10);
+  }
+  dom.txEd.hidden = false;
+  dom.txInput.focus();
+  dom.txInput.select();
+}
+
+function hideTxEd() {
+  dom.txEd.hidden = true;
+  ed.txCtx = null;
+}
+
+function txCommit() {
+  const ctx = ed.txCtx;
+  if (!ctx) return;
+  const text = dom.txInput.value;
+  const size = clamp(parseFloat(dom.txSize.value) || 12, 4, 200);
+  const color = hexTo01(dom.txColor.value || '#000000');
+  hideTxEd();
+  eRun(async () => {
+    let r;
+    if (ctx.mode === 'replace') {
+      const l = ctx.line;
+      r = await engine('opReplaceText', {
+        key: eKey(), idx: ed.idx,
+        rect: { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 },
+        baseline: l.baseline, text, size, color,
+      });
+    } else {
+      if (!text.trim()) return;
+      r = await engine('opAddText', {
+        key: eKey(), idx: ed.idx, x: ctx.x, baseline: ctx.baseline, text, size, color,
+      });
+    }
+    if (r && r.dropped > 0) {
+      toast(`${r.dropped} carácter(es) sin equivalente en la fuente se sustituyeron por «?»`, 'err');
+    }
+    await eAfterOp();
+  });
+}
+
+function txDelete() {
+  const ctx = ed.txCtx;
+  if (!ctx || ctx.mode !== 'replace') { hideTxEd(); return; }
+  const l = ctx.line;
+  hideTxEd();
+  eRun(async () => {
+    await engine('opReplaceText', {
+      key: eKey(), idx: ed.idx,
+      rect: { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 },
+      text: '', size: l.size, color: l.color,
+    });
+    await eAfterOp();
+  });
+}
+
+function eDeleteSelectedImage() {
+  if (ed.selImg == null) return;
+  const m = ed.images[ed.selImg];
+  eRun(async () => {
+    await engine('opDeleteImage', { key: eKey(), idx: ed.idx, rect: { x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1 } });
+    await eAfterOp();
+  });
+}
+
+/* --- interacción de puntero sobre la superposición --- */
+let eDrag = null;
+
+function eFitzXY(e) {
+  const r = dom.editCanvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / ed.cssScale, (e.clientY - r.top) / ed.cssScale];
+}
+
+function onEditDown(e) {
+  if (!ed.active || ed.busy || e.button !== 0) return;
+
+  if (ed.tool === 'text') {
+    const [x, y] = eFitzXY(e);
+    setTool('select');
+    openTxEd({ mode: 'add', x: clamp(x, 0, ed.pw), baseline: clamp(y, 0, ed.ph) });
+    return;
+  }
+
+  if (ed.tool === 'image') {
+    if (!ed.pendingImg) { dom.eImgFile.click(); return; }
+    const [x, y] = eFitzXY(e);
+    const im = ed.pendingImg;
+    ed.pendingImg = null;
+    let w = Math.min(im.w * 0.75, ed.pw * 0.5);
+    let h = w * im.h / im.w;
+    if (h > ed.ph * 0.6) { h = ed.ph * 0.6; w = h * im.w / im.h; }
+    const x0 = clamp(x, 0, ed.pw - w), y0 = clamp(y, 0, ed.ph - h);
+    setTool('select');
+    eRun(async () => {
+      await engine('opAddImage', {
+        key: eKey(), idx: ed.idx, png: im.bytes,
+        rect: { x0, y0, x1: x0 + w, y1: y0 + h },
+      }, [im.bytes.buffer]);
+      await eAfterOp();
+    });
+    return;
+  }
+
+  if (ed.tool === 'erase') {
+    const [x, y] = eFitzXY(e);
+    eDrag = { mode: 'marquee', x0: x, y0: y };
+    dom.editOverlay.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    return;
+  }
+
+  // herramienta seleccionar
+  const imgEl = e.target.closest?.('.eimg');
+  if (imgEl) {
+    const i = Number(imgEl.dataset.img);
+    eSelectImg(i);
+    hideTxEd();
+    const m = ed.images[i];
+    eDrag = {
+      mode: e.target.dataset?.cor ? 'resize' : 'move',
+      cor: e.target.dataset?.cor || null,
+      i, el: imgEl,
+      sx: e.clientX, sy: e.clientY,
+      orig: { x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1 },
+      out: null,
+    };
+    dom.editOverlay.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    return;
+  }
+  if (e.target.closest?.('.eln')) return; // el click de la línea abre el editor
+
+  eSelectImg(null);
+  hideTxEd();
+}
+
+function onEditMove(e) {
+  if (!eDrag) return;
+  const s = ed.cssScale;
+
+  if (eDrag.mode === 'marquee') {
+    const [x, y] = eFitzXY(e);
+    const r = {
+      x0: Math.min(eDrag.x0, x), y0: Math.min(eDrag.y0, y),
+      x1: Math.max(eDrag.x0, x), y1: Math.max(eDrag.y0, y),
+    };
+    eDrag.out = r;
+    const mq = dom.marquee;
+    mq.style.display = 'block';
+    mq.style.left = (r.x0 * s) + 'px';
+    mq.style.top = (r.y0 * s) + 'px';
+    mq.style.width = ((r.x1 - r.x0) * s) + 'px';
+    mq.style.height = ((r.y1 - r.y0) * s) + 'px';
+    return;
+  }
+
+  const dx = (e.clientX - eDrag.sx) / s;
+  const dy = (e.clientY - eDrag.sy) / s;
+  const o = eDrag.orig;
+  let r;
+
+  if (eDrag.mode === 'move') {
+    const w = o.x1 - o.x0, h = o.y1 - o.y0;
+    const x0 = clamp(o.x0 + dx, 0, ed.pw - w);
+    const y0 = clamp(o.y0 + dy, 0, ed.ph - h);
+    r = { x0, y0, x1: x0 + w, y1: y0 + h };
+  } else {
+    r = { ...o };
+    if (eDrag.cor.includes('w')) r.x0 = Math.min(o.x0 + dx, o.x1 - 6);
+    if (eDrag.cor.includes('e')) r.x1 = Math.max(o.x1 + dx, o.x0 + 6);
+    if (eDrag.cor.includes('n')) r.y0 = Math.min(o.y0 + dy, o.y1 - 6);
+    if (eDrag.cor.includes('s')) r.y1 = Math.max(o.y1 + dy, o.y0 + 6);
+    if (e.shiftKey) {
+      const ratio = (o.x1 - o.x0) / (o.y1 - o.y0);
+      const w = r.x1 - r.x0;
+      const h = w / ratio;
+      if (eDrag.cor.includes('n')) r.y0 = r.y1 - h; else r.y1 = r.y0 + h;
+    }
+    r.x0 = clamp(r.x0, 0, ed.pw); r.x1 = clamp(r.x1, 0, ed.pw);
+    r.y0 = clamp(r.y0, 0, ed.ph); r.y1 = clamp(r.y1, 0, ed.ph);
+  }
+
+  eDrag.out = r;
+  eDrag.el.style.left = (r.x0 * s) + 'px';
+  eDrag.el.style.top = (r.y0 * s) + 'px';
+  eDrag.el.style.width = ((r.x1 - r.x0) * s) + 'px';
+  eDrag.el.style.height = ((r.y1 - r.y0) * s) + 'px';
+}
+
+function onEditUp() {
+  if (!eDrag) return;
+  const d = eDrag;
+  eDrag = null;
+  dom.marquee.style.display = 'none';
+
+  if (d.mode === 'marquee') {
+    const r = d.out;
+    if (r && (r.x1 - r.x0) > 2 && (r.y1 - r.y0) > 2) {
+      eRun(async () => {
+        await engine('opEraseArea', { key: eKey(), idx: ed.idx, rect: r, mode: 'both' });
+        await eAfterOp();
+      });
+    }
+    return;
+  }
+
+  const r = d.out, o = d.orig;
+  if (!r) return;
+  const moved = Math.abs(r.x0 - o.x0) + Math.abs(r.y0 - o.y0) +
+                Math.abs(r.x1 - o.x1) + Math.abs(r.y1 - o.y1);
+  if (moved < 0.75) { buildOverlay(); eSelectImg(d.i); return; } // solo fue un clic
+  eRun(async () => {
+    await engine('opMoveImage', { key: eKey(), idx: ed.idx, rect: o, newRect: r });
+    await eAfterOp();
+  });
+}
+
+function onEditClickLine(e) {
+  if (!ed.active || ed.busy || ed.tool !== 'select') return;
+  const ln = e.target.closest?.('.eln');
+  if (!ln) return;
+  const l = ed.lines[Number(ln.dataset.line)];
+  if (l) { eSelectImg(null); openTxEd({ mode: 'replace', line: l }); }
+}
+
+/* --- aplicar los cambios al documento del visor --- */
+async function reloadSourceAfterEdit(srcId) {
+  const src = state.sources.get(srcId);
+  const copy = new Uint8Array(src.editedBytes); // pdf.js consume su propia copia
+  const doc = await pdfjsLib.getDocument({
+    data: copy,
+    cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true,
+    standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
+  }).promise;
+  try { src.doc.destroy(); } catch { /* ya destruido */ }
+  src.doc = doc;
+  src.pageCache = new Map();
+  const pref = srcId + ':';
+  for (const k of [...bmpCache.keys()]) {
+    if (k.startsWith(pref)) {
+      const e = bmpCache.get(k);
+      bmpCache.delete(k);
+      try { e.bmp.close?.(); } catch { /* liberado */ }
+    }
+  }
+  for (const k of [...dims.keys()]) if (k.startsWith(pref)) dims.delete(k);
+  for (const row of vlist.poolRows) { row.dataset.painted = '0'; row.dataset.uid = ''; }
+}
+
+/* --- cableado del modo edición --- */
+(function wireEdit() {
+  dom.editEnter.addEventListener('click', enterEdit);
+
+  for (const b of dom.editbar.querySelectorAll('[data-tool]')) {
+    b.addEventListener('click', () => { if (!ed.busy) setTool(b.dataset.tool); });
+  }
+
+  dom.eUndo.addEventListener('click', () => eRun(async () => {
+    await engine('undo', { key: eKey() });
+    hideTxEd();
+    await eAfterOp();
+  }));
+  dom.eRedo.addEventListener('click', () => eRun(async () => {
+    await engine('redo', { key: eKey() });
+    hideTxEd();
+    await eAfterOp();
+  }));
+
+  dom.eCancel.addEventListener('click', () => {
+    if (ed.busy) return;
+    if (ed.dirty && !confirm('¿Descartar los cambios de edición de esta página?')) return;
+    forceExitEdit();
+  });
+
+  dom.eDone.addEventListener('click', () => eRun(async () => {
+    if (ed.dirty) {
+      eSetStatus('Aplicando cambios al documento…');
+      const r = await engine('save', { key: eKey() });
+      const src = state.sources.get(ed.srcId);
+      src.editedBytes = new Uint8Array(r.bytes);
+      await reloadSourceAfterEdit(ed.srcId);
+      toast('Edición aplicada al documento', 'ok');
+    }
+    forceExitEdit();
+  }));
+
+  dom.eImgFile.addEventListener('change', async () => {
+    const f = dom.eImgFile.files[0];
+    dom.eImgFile.value = '';
+    if (!f) { if (ed.tool === 'image') setTool('select'); return; }
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const bmp = await createImageBitmap(new Blob([bytes], { type: f.type }));
+      ed.pendingImg = { bytes, w: bmp.width, h: bmp.height, name: f.name };
+      bmp.close();
+      eSetStatus(`Clic en la página donde colocar «${f.name}»`);
+    } catch {
+      toast('No se pudo leer la imagen (usa PNG o JPG)', 'err');
+      setTool('select');
+    }
+  });
+
+  dom.txSave.addEventListener('click', txCommit);
+  dom.txDel.addEventListener('click', txDelete);
+  dom.txInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); txCommit(); }
+    if (e.key === 'Escape') { e.preventDefault(); hideTxEd(); }
+  });
+
+  dom.editOverlay.addEventListener('pointerdown', onEditDown);
+  dom.editOverlay.addEventListener('pointermove', onEditMove);
+  dom.editOverlay.addEventListener('pointerup', onEditUp);
+  dom.editOverlay.addEventListener('pointercancel', onEditUp);
+  dom.editOverlay.addEventListener('click', onEditClickLine);
+})();
+
 /* ---------- Vaciar proyecto ---------- */
 function resetAll() {
   if (!state.pages.length && !state.sources.size) return;
   if (!confirm('Se vaciará todo el proyecto (los archivos originales de tu disco no se tocan). ¿Continuar?')) return;
+  if (ed.active) forceExitEdit();
+  if (engWorker) engine('closeAll').catch(() => { /* motor sin abrir */ });
   for (const s of state.sources.values()) { try { s.doc.destroy(); } catch { /* ya liberado */ } }
   for (const e of bmpCache.values()) { try { e.bmp.close?.(); } catch { /* ya cerrado */ } }
   state.sources.clear();
@@ -1653,6 +2298,19 @@ function wire() {
   window.addEventListener('keydown', (e) => {
     const tag = document.activeElement?.tagName;
     const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+    if (ed.active) {
+      if (e.key === 'Escape' && !typing) { hideTxEd(); eSelectImg(null); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
+        e.preventDefault();
+        (e.shiftKey ? dom.eRedo : dom.eUndo).click();
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && ed.selImg != null) {
+        e.preventDefault();
+        eDeleteSelectedImage();
+      }
+      return; // el resto de atajos de la app quedan en pausa
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !typing && state.sel.size) {
       e.preventDefault();
       deleteUids([...state.sel]);
@@ -1667,7 +2325,13 @@ function wire() {
   let rzT;
   new ResizeObserver(() => {
     clearTimeout(rzT);
-    rzT = setTimeout(renderMain, 120);
+    rzT = setTimeout(() => {
+      if (ed.active) {
+        if (!ed.busy && ed.pw) eRun(async () => { await eRender(); buildOverlay(); });
+      } else {
+        renderMain();
+      }
+    }, 120);
   }).observe(dom.mat);
 }
 

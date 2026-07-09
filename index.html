@@ -337,8 +337,10 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
   font-size:27px;font-weight:700;line-height:1;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35)}
 .navarr:hover{filter:brightness(1.06)}
 .navarr:disabled{opacity:.35;cursor:default;filter:none}
-.navarr.prev{left:12px}
-.navarr.next{right:12px}
+.navarr.prev{left:68px}
+.navarr.next{right:68px}
+body.editing .navarr.prev{left:12px}
+body.editing .navarr.next{right:12px}
 .viewer:fullscreen{background:var(--panel)}
 .editwrap.busy{cursor:progress}
 .editwrap.busy::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.30)}
@@ -562,6 +564,19 @@ body.editing .tools,body.editing .strip{opacity:.4;pointer-events:none;filter:sa
       <p class="hint">Clic para elegir la página actual · Ctrl+clic suma a la selección · Mayús+clic selecciona un rango · tecla Supr elimina la selección.</p>
     </section>
 
+    <section id="toolRotate">
+      <h3 class="eyebrow">GIRAR</h3>
+      <div class="inline">
+        <div class="field">
+          <label for="rotRange">Girar por número o intervalo</label>
+          <input id="rotRange" type="text" placeholder="p. ej. 2, 5-8, 12" autocomplete="off">
+        </div>
+        <button id="rotLeft" class="btn" type="button" title="Girar 90° a la izquierda">⟲</button>
+        <button id="rotRight" class="btn" type="button" title="Girar 90° a la derecha">⟳</button>
+      </div>
+      <p class="hint">Con el campo vacío gira las seleccionadas o la página actual. El giro se aplica al descargar; Ctrl+Z lo deshace.</p>
+    </section>
+
     <section id="toolOrder">
       <h3 class="eyebrow">ORDEN</h3>
       <p class="hint" style="margin-top:0">Arrastra las miniaturas para reordenar, o mueve por posición:</p>
@@ -696,6 +711,7 @@ const dom = {
   cropT: $('#cropT'), cropR: $('#cropR'), cropB: $('#cropB'), cropL: $('#cropL'),
   resizeA4: $('#resizeA4'), keepAspect: $('#keepAspect'),
   cropDims: $('#cropDims'), applyCrop: $('#applyCrop'), clearCrop: $('#clearCrop'),
+  rotRange: $('#rotRange'), rotLeft: $('#rotLeft'), rotRight: $('#rotRight'),
   cropChip: $('#cropChip'),
   delRange: $('#delRange'), delRangeBtn: $('#delRangeBtn'), delSelBtn: $('#delSelBtn'),
   moveFrom: $('#moveFrom'), moveTo: $('#moveTo'), moveBtn: $('#moveBtn'),
@@ -719,7 +735,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const yieldUI = () => new Promise((r) => setTimeout(r, 0));
 const fmtCm = (pt) => (pt / CM).toFixed(1).replace('.', ',');
 const bKey = (p) => p.srcId + ':' + p.idx;
-const cropSig = (p) => p.crop ? `${p.crop.t},${p.crop.r},${p.crop.b},${p.crop.l}` : '';
+const cropSig = (p) => (p.crop ? `${p.crop.t},${p.crop.r},${p.crop.b},${p.crop.l}` : '') + '|' + (p.rot || 0);
 
 function srcLetter(id) {
   let s = '', n = id;
@@ -930,18 +946,29 @@ async function rasterizeThumb(p) {
   return entry;
 }
 
-function blitThumb(cnv, bm, crop) {
+function blitThumb(cnv, bm, crop, rot = 0) {
   const k = bm.w / bm.vw;
+  let sx = 0, sy = 0, sw = bm.w, sh = bm.h;
   if (crop) {
-    const sx = crop.l * CM * k, sy = crop.t * CM * k;
-    const sw = Math.max(1, (bm.vw - (crop.l + crop.r) * CM) * k);
-    const sh = Math.max(1, (bm.vh - (crop.t + crop.b) * CM) * k);
-    cnv.width = Math.round(sw); cnv.height = Math.round(sh);
-    cnv.getContext('2d').drawImage(bm.bmp, sx, sy, sw, sh, 0, 0, cnv.width, cnv.height);
-  } else {
-    cnv.width = bm.w; cnv.height = bm.h;
-    cnv.getContext('2d').drawImage(bm.bmp, 0, 0);
+    /* el corte se guarda en orientación visual: se desgira para recortar el bitmap base */
+    const u = rot === 90  ? { t: crop.r, r: crop.b, b: crop.l, l: crop.t }
+            : rot === 180 ? { t: crop.b, r: crop.l, b: crop.t, l: crop.r }
+            : rot === 270 ? { t: crop.l, r: crop.t, b: crop.r, l: crop.b }
+            : crop;
+    sx = u.l * CM * k; sy = u.t * CM * k;
+    sw = Math.max(1, (bm.vw - (u.l + u.r) * CM) * k);
+    sh = Math.max(1, (bm.vh - (u.t + u.b) * CM) * k);
   }
+  const dw = Math.max(1, Math.round((rot % 180) ? sh : sw));
+  const dh = Math.max(1, Math.round((rot % 180) ? sw : sh));
+  cnv.width = dw; cnv.height = dh;
+  const ctx = cnv.getContext('2d');
+  ctx.save();
+  if (rot === 90) { ctx.translate(dw, 0); ctx.rotate(Math.PI / 2); }
+  else if (rot === 180) { ctx.translate(dw, dh); ctx.rotate(Math.PI); }
+  else if (rot === 270) { ctx.translate(0, dh); ctx.rotate(-Math.PI / 2); }
+  ctx.drawImage(bm.bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+  ctx.restore();
 }
 
 /* Cola de rasterizado: concurrencia 2, descarta lo que ya no está en pantalla */
@@ -977,7 +1004,7 @@ async function runThumbJob(job) {
   const row = vlist.rowByUid(job.uid);
   const pNow = pageByUid(job.uid);
   if (row && pNow) {
-    blitThumb(row.querySelector('canvas'), bm, pNow.crop);
+    blitThumb(row.querySelector('canvas'), bm, pNow.crop, pNow.rot || 0);
     row.dataset.painted = '1';
     row.dataset.cropSig = cropSig(pNow);
   }
@@ -1036,13 +1063,13 @@ const vlist = (() => {
       const bm = bmpCache.get(key);
       const cnv = row.querySelector('canvas');
       if (bm) {
-        blitThumb(cnv, bm, p.crop);
+        blitThumb(cnv, bm, p.crop, p.rot || 0);
         row.dataset.painted = '1';
         row.dataset.cropSig = cropSig(p);
       } else {
         // Marcador en blanco con la proporción conocida (o A4 por defecto)
         const d = dims.get(key);
-        const ratio = d ? d.w / d.h : 0.707;
+        const ratio = d ? (((p.rot || 0) % 180) ? d.h / d.w : d.w / d.h) : 0.707;
         cnv.height = 140;
         cnv.width = Math.max(20, Math.round(140 * ratio));
         row.dataset.painted = '0';
@@ -1139,20 +1166,24 @@ async function renderMain() {
   if (my !== mainToken) return;
 
   const vp1 = page.getViewport({ scale: 1 });
-  lastVis = { w: vp1.width, h: vp1.height };
   dims.set(bKey(p), { w: vp1.width, h: vp1.height });
+  const rotD = p.rot || 0;
+  const bw = (rotD % 180) ? vp1.height : vp1.width;   // tamaño visual con el giro pendiente
+  const bh = (rotD % 180) ? vp1.width : vp1.height;
+  lastVis = { w: bw, h: bh };
 
   const c = p.crop;
-  const visW = c ? vp1.width - (c.l + c.r) * CM : vp1.width;
-  const visH = c ? vp1.height - (c.t + c.b) * CM : vp1.height;
+  const visW = c ? bw - (c.l + c.r) * CM : bw;
+  const visH = c ? bh - (c.t + c.b) * CM : bh;
 
   const pos = posOfUid(p.uid) + 1;
   const near = (a, b) => Math.abs(a - b) < 3;
-  const sizeName = (near(vp1.width, A4.w) && near(vp1.height, A4.h)) ? 'A4'
-                 : (near(vp1.width, A4.h) && near(vp1.height, A4.w)) ? 'A4 apaisado' : '';
+  const sizeName = (near(bw, A4.w) && near(bh, A4.h)) ? 'A4'
+                 : (near(bw, A4.h) && near(bh, A4.w)) ? 'A4 apaisado' : '';
   dom.pageInfo.innerHTML =
     `<b>Página ${pos.toLocaleString('es')} de ${state.pages.length.toLocaleString('es')}</b> · ${escapeHtml(src.name)} · ` +
-    `${fmtCm(vp1.width)} × ${fmtCm(vp1.height)} cm${sizeName ? ' (' + sizeName + ')' : ''}` +
+    `${fmtCm(bw)} × ${fmtCm(bh)} cm${sizeName ? ' (' + sizeName + ')' : ''}` +
+    (rotD ? ` · <b style="color:var(--ok)">girada ${rotD}°</b>` : '') +
     (c ? ` · <b style="color:var(--ok)">corte: ${fmtCm(visW)} × ${fmtCm(visH)} cm</b>` : '');
 
   const box = dom.mat.getBoundingClientRect();
@@ -1171,7 +1202,7 @@ async function renderMain() {
   dom.canvas.style.width = cssW + 'px';
   dom.canvas.style.height = cssH + 'px';
 
-  const vp = page.getViewport({ scale: bs });
+  const vp = page.getViewport({ scale: bs, rotation: rotNorm(page.rotate + rotD) });
 
   try {
     mainOff.width = Math.max(1, Math.ceil(vp.width));
@@ -1364,7 +1395,9 @@ async function applyCrop() {
   }
   const bad = [];
   for (const uid of uids) {
-    const dm = dims.get(bKey(pageByUid(uid)));
+    const pg0 = pageByUid(uid);
+    const raw = dims.get(bKey(pg0));
+    const dm = raw && ((pg0.rot || 0) % 180) ? { w: raw.h, h: raw.w } : raw;
     if (!dm ||
         dm.w - (d.l + d.r) * CM < MINR_CM * CM ||
         dm.h - (d.t + d.b) * CM < MINR_CM * CM) {
@@ -1529,6 +1562,49 @@ function selectClick(uid, ev) {
   renderMain();
 }
 
+/* ---------- Giro de páginas (se aplica al descargar) ---------- */
+function rotCropVisual(crop, dir) {
+  if (!crop) return crop;
+  const { t, r, b, l } = crop;
+  return dir > 0
+    ? { ...crop, t: l, r: t, b: r, l: b }   // horario: lo que estaba a la izquierda pasa arriba
+    : { ...crop, t: r, r: b, b: l, l: t };  // antihorario
+}
+
+function rotScopeUids() {
+  const txt = dom.rotRange.value.trim();
+  if (txt) {
+    const pos = parseRanges(txt, state.pages.length);
+    return [...pos].map((n) => state.pages[n - 1].uid);
+  }
+  if (state.sel.size) return state.pages.filter((p) => state.sel.has(p.uid)).map((p) => p.uid);
+  return state.curUid != null ? [state.curUid] : [];
+}
+
+function rotatePages(uids, dir) {
+  if (ed.active) { toast('Sal del modo edición para girar páginas', 'err'); return; }
+  if (!uids.length) { toast('No hay páginas que girar', 'err'); return; }
+  const snap = takeSnap();
+  const set = new Set(uids);
+  state.pages = state.pages.map((p) => set.has(p.uid)
+    ? { ...p, rot: (((p.rot || 0) + (dir > 0 ? 90 : 270)) % 360), crop: rotCropVisual(p.crop, dir) }
+    : p);
+  rebuildIndex();
+  undoPush(snap);
+  vlist.refresh();
+  statusSync();
+  renderMain();
+  const n = uids.length;
+  toast(`${n.toLocaleString('es')} página${n === 1 ? '' : 's'} girada${n === 1 ? '' : 's'} ${dir > 0 ? 'a la derecha' : 'a la izquierda'}`, 'ok');
+}
+
+function doRotate(dir) {
+  let uids;
+  try { uids = rotScopeUids(); }
+  catch (e) { toast(e.message, 'err'); return; }
+  rotatePages(uids, dir);
+}
+
 /* ---------- Exportación (pdf-lib, por lotes) ---------- */
 const rotNorm = (a) => ((a % 360) + 360) % 360;
 
@@ -1589,8 +1665,13 @@ async function exportPdf() {
       const sdoc = await libDoc(run.srcId);
       for (let o = 0; o < run.idxs.length; o += EXPORT_CHUNK) {
         const part = run.idxs.slice(o, o + EXPORT_CHUNK);
+        const partRots = run.rots.slice(o, o + EXPORT_CHUNK);
         const cps = await out.copyPages(sdoc, part);
-        for (const cp of cps) out.addPage(cp);
+        for (let j = 0; j < cps.length; j++) {
+          const cp = cps[j];
+          if (partRots[j]) cp.setRotation(PDFLib.degrees(rotNorm(cp.getRotation().angle + partRots[j])));
+          out.addPage(cp);
+        }
         processed += part.length;
         await report(false);
       }
@@ -1601,15 +1682,15 @@ async function exportPdf() {
       const ref = state.pages[i];
 
       if (!ref.crop) {
-        if (run && run.srcId === ref.srcId) run.idxs.push(ref.idx);
-        else { await flushRun(); run = { srcId: ref.srcId, idxs: [ref.idx] }; }
+        if (run && run.srcId === ref.srcId) { run.idxs.push(ref.idx); run.rots.push(ref.rot || 0); }
+        else { await flushRun(); run = { srcId: ref.srcId, idxs: [ref.idx], rots: [ref.rot || 0] }; }
         continue;
       }
 
       await flushRun();
       const sdoc = await libDoc(ref.srcId);
       const spage = sdoc.getPage(ref.idx);
-      const rot = rotNorm(spage.getRotation().angle);
+      const rot = rotNorm(spage.getRotation().angle + (ref.rot || 0));
       const mb = spage.getMediaBox();
       const c = ref.crop;
       const m = visualToUnrotated(rot, c.t * CM, c.r * CM, c.b * CM, c.l * CM);
@@ -1637,6 +1718,7 @@ async function exportPdf() {
         const [cp] = await out.copyPages(sdoc, [ref.idx]);
         cp.setMediaBox(rect.left, rect.bottom, cw, ch);
         cp.setCropBox(rect.left, rect.bottom, cw, ch);
+        cp.setRotation(PDFLib.degrees(rot));
         out.addPage(cp);
       }
       processed++;
@@ -2131,6 +2213,7 @@ async function enterEdit() {
   const p = curPage();
   if (!p || ed.active) return;
   if (p.crop) { toast('Esta página tiene un corte pendiente. Quítalo antes de editar el contenido.', 'err'); return; }
+  if (p.rot) { toast('Esta página tiene un giro pendiente. Gírala de vuelta antes de editar el contenido.', 'err'); return; }
   const src = state.sources.get(p.srcId);
 
   ed.active = true; ed.srcId = p.srcId; ed.idx = p.idx; ed.uid = p.uid;
@@ -2912,6 +2995,8 @@ function wire() {
   document.querySelectorAll('input[name=scope]').forEach((el) =>
     el.addEventListener('change', syncCropButtons));
   dom.applyCrop.addEventListener('click', applyCrop);
+  dom.rotLeft.addEventListener('click', () => doRotate(-1));
+  dom.rotRight.addEventListener('click', () => doRotate(1));
   dom.clearCrop.addEventListener('click', clearCrop);
 
   // Corte: cuchillas arrastrables (tapete ⇄ panel)

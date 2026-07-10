@@ -799,7 +799,10 @@ const handles = [...document.querySelectorAll('.hzone,.hcorner')];
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const yieldUI = () => new Promise((r) => setTimeout(r, 0));
 const fmtCm = (pt) => (pt / CM).toFixed(1).replace('.', ',');
-const bKey = (p) => p.srcId + ':' + p.idx;
+const bKey = (p) => {
+  const pe = state.sources.get(p.srcId)?.pageEdits?.get(p.idx);
+  return p.srcId + ':' + p.idx + (pe ? ':e' + pe.rev : '');
+};
 const cropSig = (p) => (p.crop ? `${p.crop.t},${p.crop.r},${p.crop.b},${p.crop.l}` : '') + '|' + (p.rot || 0);
 
 function srcLetter(id) {
@@ -871,9 +874,540 @@ function undoAct() {
 /* ---------- Documentos de origen ---------- */
 function getPage(srcId, idx) {
   const src = state.sources.get(srcId);
-  let pr = src.pageCache.get(idx);
-  if (!pr) { pr = src.doc.getPage(idx + 1); src.pageCache.set(idx, pr); }
+  const pe = src.pageEdits && src.pageEdits.get(idx);
+  const key = pe ? 'E' + idx + ':' + pe.rev : idx;
+  let pr = src.pageCache.get(key);
+  if (!pr) {
+    pr = pe ? pe.doc.getPage(1) : src.doc.getPage(idx + 1);
+    src.pageCache.set(key, pr);
+  }
   return pr;
+}
+
+/* ===================== Extractor de página única por rangos =====================
+   Lee de un PDF (Blob) SOLO los objetos que necesita una página concreta
+   (índice xref + clausura de referencias) y fabrica un mini-PDF válido e
+   independiente con esa única página. Nunca materializa el documento entero.
+
+   Soporta: tablas xref clásicas, streams xref (con predictores PNG), streams
+   de objetos (/ObjStm), cadenas /Prev e híbridos /XRefStm, /Length indirecto,
+   herencia de Resources/MediaBox/CropBox/Rotate.
+   Rechaza (lanza error, la app cae al camino clásico): PDFs cifrados, filtros
+   raros en xref/ObjStm, páginas cuya clausura pesa casi tanto como el archivo. */
+
+const LATIN = new TextDecoder('latin1');
+const TE = new TextEncoder();
+
+const WS = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20]);
+const DELIM = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]);
+
+async function sliceBytes(blob, a, b) {
+  return new Uint8Array(await blob.slice(a, Math.min(b, blob.size)).arrayBuffer());
+}
+
+async function inflateFlate(u8) {
+  const attempt = async (fmt) => {
+    const ds = new DecompressionStream(fmt);
+    const res = new Response(new Blob([u8]).stream().pipeThrough(ds));
+    return new Uint8Array(await res.arrayBuffer());
+  };
+  try { return await attempt('deflate'); }
+  catch { return attempt('deflate-raw'); }
+}
+
+/* Deshace los predictores PNG (los streams xref casi siempre usan el 12). */
+function undoPredictor(data, predictor, columns) {
+  if (!predictor || predictor < 10) return data;
+  const row = columns;
+  const n = Math.floor(data.length / (row + 1));
+  const out = new Uint8Array(n * row);
+  let prev = new Uint8Array(row);
+  for (let r = 0; r < n; r++) {
+    const ft = data[r * (row + 1)];
+    const src = data.subarray(r * (row + 1) + 1, (r + 1) * (row + 1));
+    const dst = out.subarray(r * row, (r + 1) * row);
+    for (let i = 0; i < row; i++) {
+      const raw = src[i];
+      const left = i > 0 ? dst[i - 1] : 0;
+      const up = prev[i];
+      const ul = i > 0 ? prev[i - 1] : 0;
+      let v;
+      if (ft === 0) v = raw;
+      else if (ft === 1) v = raw + left;
+      else if (ft === 2) v = raw + up;
+      else if (ft === 3) v = raw + ((left + up) >> 1);
+      else if (ft === 4) {
+        const p = left + up - ul;
+        const pa = Math.abs(p - left), pb = Math.abs(p - up), pc = Math.abs(p - ul);
+        v = raw + (pa <= pb && pa <= pc ? left : pb <= pc ? up : ul);
+      } else throw new Error('predictor PNG desconocido: ' + ft);
+      dst[i] = v & 0xff;
+    }
+    prev = dst;
+  }
+  return out;
+}
+
+/* ------------------------- Parser de objetos PDF ------------------------- */
+/* Devuelve valores con forma {t, ...}; las cadenas conservan sus bytes
+   originales para poder re-emitirlas idénticas. */
+
+function isRegular(c) { return !WS.has(c) && !DELIM.has(c); }
+
+function skipWs(buf, p) {
+  while (p < buf.length) {
+    const c = buf[p];
+    if (WS.has(c)) { p++; continue; }
+    if (c === 0x25) { while (p < buf.length && buf[p] !== 0x0a && buf[p] !== 0x0d) p++; continue; }
+    break;
+  }
+  return p;
+}
+
+function parseValue(buf, p) {
+  p = skipWs(buf, p);
+  if (p >= buf.length) throw new Error('fin inesperado');
+  const c = buf[p];
+
+  if (c === 0x3c && buf[p + 1] === 0x3c) { // <<
+    const map = new Map();
+    p += 2;
+    for (;;) {
+      p = skipWs(buf, p);
+      if (buf[p] === 0x3e && buf[p + 1] === 0x3e) { p += 2; break; }
+      if (buf[p] !== 0x2f) throw new Error('clave de diccionario esperada');
+      let k; [k, p] = parseValue(buf, p);
+      let v; [v, p] = parseValue(buf, p);
+      map.set(k.v, v);
+    }
+    return [{ t: 'dict', v: map }, p];
+  }
+  if (c === 0x5b) { // [
+    const arr = [];
+    p++;
+    for (;;) {
+      p = skipWs(buf, p);
+      if (buf[p] === 0x5d) { p++; break; }
+      let v; [v, p] = parseValue(buf, p);
+      arr.push(v);
+    }
+    return [{ t: 'arr', v: arr }, p];
+  }
+  if (c === 0x2f) { // /Nombre
+    let q = p + 1;
+    while (q < buf.length && isRegular(buf[q])) q++;
+    return [{ t: 'name', v: LATIN.decode(buf.subarray(p + 1, q)) }, q];
+  }
+  if (c === 0x28) { // (cadena)
+    let depth = 0, q = p;
+    for (;;) {
+      const ch = buf[q];
+      if (ch === undefined) throw new Error('cadena sin cerrar');
+      if (ch === 0x5c) { q += 2; continue; }
+      if (ch === 0x28) depth++;
+      else if (ch === 0x29) { depth--; if (!depth) { q++; break; } }
+      q++;
+    }
+    return [{ t: 'str', raw: buf.slice(p, q) }, q];
+  }
+  if (c === 0x3c) { // <hex>
+    let q = p + 1;
+    while (q < buf.length && buf[q] !== 0x3e) q++;
+    return [{ t: 'str', raw: buf.slice(p, q + 1) }, q + 1];
+  }
+  // número, referencia, bool, null o palabra clave
+  let q = p;
+  while (q < buf.length && isRegular(buf[q])) q++;
+  const w = LATIN.decode(buf.subarray(p, q));
+  if (w === 'true' || w === 'false') return [{ t: 'bool', v: w === 'true' }, q];
+  if (w === 'null') return [{ t: 'null' }, q];
+  if (/^[+-]?[\d.]+$/.test(w)) {
+    // ¿referencia «n g R»?
+    let r = skipWs(buf, q);
+    let r2 = r;
+    while (r2 < buf.length && buf[r2] >= 0x30 && buf[r2] <= 0x39) r2++;
+    if (r2 > r) {
+      const r3 = skipWs(buf, r2);
+      if (buf[r3] === 0x52 && !isRegular(buf[r3 + 1] ?? 0x20)) {
+        return [{ t: 'ref', num: parseInt(w, 10), gen: parseInt(LATIN.decode(buf.subarray(r, r2)), 10) }, r3 + 1];
+      }
+    }
+    return [{ t: 'num', v: parseFloat(w) }, q];
+  }
+  return [{ t: 'kw', v: w }, q];
+}
+
+function serialize(v) {
+  switch (v.t) {
+    case 'dict': {
+      let s = '<< ';
+      for (const [k, val] of v.v) s += '/' + k + ' ' + serialize(val) + ' ';
+      return s + '>>';
+    }
+    case 'arr': return '[ ' + v.v.map(serialize).join(' ') + ' ]';
+    case 'name': return '/' + v.v;
+    case 'num': return Number.isInteger(v.v) ? String(v.v) : String(v.v);
+    case 'ref': return `${v.num} ${v.gen} R`;
+    case 'str': return LATIN.decode(v.raw);
+    case 'bool': return String(v.v);
+    case 'null': return 'null';
+    default: throw new Error('no serializable: ' + v.t);
+  }
+}
+
+function refsOf(v, out) {
+  if (!v) return out;
+  if (v.t === 'ref') out.push(v.num);
+  else if (v.t === 'arr') for (const x of v.v) refsOf(x, out);
+  else if (v.t === 'dict') for (const x of v.v.values()) refsOf(x, out);
+  return out;
+}
+
+/* ------------------------------- Extractor ------------------------------- */
+
+async function extractSinglePage(blob, pageIndex) {
+  const size = blob.size;
+  if (size < 64) throw new Error('archivo demasiado pequeño');
+
+  /* --- startxref --- */
+  const tail = await sliceBytes(blob, Math.max(0, size - 4096), size);
+  const tailTxt = LATIN.decode(tail);
+  const sx = tailTxt.lastIndexOf('startxref');
+  if (sx < 0) throw new Error('sin startxref');
+  const m = /startxref\s+(\d+)/.exec(tailTxt.slice(sx));
+  if (!m) throw new Error('startxref ilegible');
+
+  /* --- índice xref (cadena completa) --- */
+  const xref = new Map(); // num → {type:1,offset,gen} | {type:2,stm,idx}
+  let rootRef = null;
+  const seenOff = new Set();
+  let off = parseInt(m[1], 10);
+  const pendingXrefStm = [];
+
+  const readChunk = async (at, len) => sliceBytes(blob, at, at + len);
+
+  async function parseXrefStreamObj(at) {
+    // objeto «n g obj <<dict>> stream ... endstream»
+    let win = 1 << 15;
+    let buf = await readChunk(at, win);
+    let p = skipWs(buf, 0);
+    let v;
+    [v, p] = parseValue(buf, p); // num
+    [v, p] = parseValue(buf, p); // gen
+    [v, p] = parseValue(buf, p); // obj
+    let dict;
+    [dict, p] = parseValue(buf, p);
+    p = skipWs(buf, p);
+    if (LATIN.decode(buf.subarray(p, p + 6)) !== 'stream') throw new Error('xref stream sin stream');
+    p += 6;
+    if (buf[p] === 0x0d) p++;
+    if (buf[p] === 0x0a) p++;
+    const d = dict.v;
+    const lenV = d.get('Length');
+    const length = lenV.t === 'num' ? lenV.v : (await fetchSmallNumber(lenV.num));
+    while (p + length > buf.length) { win *= 2; buf = await readChunk(at, win); }
+    let data = buf.slice(p, p + length);
+    const filter = d.get('Filter');
+    const fname = filter ? (filter.t === 'arr' ? filter.v[0]?.v : filter.v) : null;
+    if (fname === 'FlateDecode') data = await inflateFlate(data);
+    else if (fname) throw new Error('filtro xref no soportado: ' + fname);
+    const dp = d.get('DecodeParms');
+    const dpd = dp ? (dp.t === 'arr' ? dp.v[0] : dp) : null;
+    if (dpd && dpd.t === 'dict') {
+      const pred = dpd.v.get('Predictor')?.v || 1;
+      const cols = dpd.v.get('Columns')?.v || 1;
+      data = undoPredictor(data, pred, cols);
+    }
+    const W = d.get('W').v.map((x) => x.v);
+    const sizeN = d.get('Size').v;
+    const idxArr = d.get('Index') ? d.get('Index').v.map((x) => x.v) : [0, sizeN];
+    const rw = W[0] + W[1] + W[2];
+    let pos = 0;
+    const rd = (w) => { let n = 0; for (let i = 0; i < w; i++) n = n * 256 + data[pos++]; return n; };
+    for (let s = 0; s < idxArr.length; s += 2) {
+      let num = idxArr[s];
+      for (let k = 0; k < idxArr[s + 1]; k++, num++) {
+        if (pos + rw > data.length) break;
+        const t = W[0] ? rd(W[0]) : 1;
+        const f2 = rd(W[1]);
+        const f3 = W[2] ? rd(W[2]) : 0;
+        if (!xref.has(num)) {
+          if (t === 1) xref.set(num, { type: 1, offset: f2, gen: f3 });
+          else if (t === 2) xref.set(num, { type: 2, stm: f2, idx: f3 });
+        }
+      }
+    }
+    return d; // diccionario del trailer
+  }
+
+  async function fetchSmallNumber(num) {
+    const e = xref.get(num);
+    if (!e || e.type !== 1) throw new Error('Length indirecto irresoluble');
+    const b = await readChunk(e.offset, 256);
+    let p = skipWs(b, 0), v;
+    [v, p] = parseValue(b, p); [v, p] = parseValue(b, p); [v, p] = parseValue(b, p); // n g obj
+    [v] = parseValue(b, p);
+    if (v.t !== 'num') throw new Error('Length no numérico');
+    return v.v;
+  }
+
+  while (Number.isFinite(off) && !seenOff.has(off)) {
+    seenOff.add(off);
+    const head = await readChunk(off, 64);
+    const hp = skipWs(head, 0);
+    let trailerDict;
+    if (LATIN.decode(head.subarray(hp, hp + 4)) === 'xref') {
+      // tabla clásica: leer con ventana creciente hasta encontrar «trailer»
+      let win = 1 << 16, buf, txt, tpos;
+      for (;;) {
+        buf = await readChunk(off, win);
+        txt = LATIN.decode(buf);
+        tpos = txt.indexOf('trailer');
+        if (tpos >= 0 || win >= (1 << 24) || off + win >= size) break;
+        win *= 2;
+      }
+      if (tpos < 0) throw new Error('tabla xref sin trailer');
+      let p = txt.indexOf('xref') + 4;
+      for (;;) {
+        while (p < tpos && /\s/.test(txt[p])) p++;
+        if (p >= tpos) break;
+        const mm = /^(\d+)\s+(\d+)/.exec(txt.slice(p, p + 40));
+        if (!mm) break;
+        let num = parseInt(mm[1], 10);
+        const cnt = parseInt(mm[2], 10);
+        p += mm[0].length;
+        while (txt[p] === ' ' || txt[p] === '\r' || txt[p] === '\n') p++;
+        for (let k = 0; k < cnt; k++, num++) {
+          const line = txt.slice(p, p + 20);
+          p += 20;
+          const em = /^(\d{10})\s(\d{5})\s([nf])/.exec(line);
+          if (!em) { p -= 20; break; }
+          if (em[3] === 'n' && !xref.has(num)) {
+            xref.set(num, { type: 1, offset: parseInt(em[1], 10), gen: parseInt(em[2], 10) });
+          }
+        }
+      }
+      const [tv] = parseValue(buf, tpos + 7);
+      trailerDict = tv.v;
+      const xs = trailerDict.get('XRefStm');
+      if (xs && xs.t === 'num') pendingXrefStm.push(xs.v);
+    } else {
+      trailerDict = await parseXrefStreamObj(off);
+    }
+    if (trailerDict.get('Encrypt')) throw new Error('PDF cifrado');
+    if (!rootRef && trailerDict.get('Root')) rootRef = trailerDict.get('Root');
+    const prev = trailerDict.get('Prev');
+    off = prev && prev.t === 'num' ? prev.v : NaN;
+  }
+  for (const at of pendingXrefStm) {
+    if (!seenOff.has(at)) { seenOff.add(at); await parseXrefStreamObj(at); }
+  }
+  if (!rootRef || rootRef.t !== 'ref') throw new Error('sin /Root');
+
+  /* --- carga de objetos --- */
+  const objCache = new Map(); // num → {kind:'raw1'|'raw2', bytes|body, value, streamStart?, gen}
+
+  async function loadObj(num) {
+    if (objCache.has(num)) return objCache.get(num);
+    const e = xref.get(num);
+    if (!e) throw new Error('objeto ' + num + ' fuera del índice');
+    let rec;
+    if (e.type === 1) {
+      let win = 1 << 13, buf, parsed = null, p0;
+      for (;;) {
+        buf = await readChunk(e.offset, win);
+        try {
+          let p = skipWs(buf, 0), v;
+          [v, p] = parseValue(buf, p);
+          if (v.t !== 'num' || v.v !== num) throw new Error(`en ${e.offset} no está el objeto ${num}`);
+          [v, p] = parseValue(buf, p);
+          const gen = v.v;
+          [v, p] = parseValue(buf, p);
+          if (v.t !== 'kw' || v.v !== 'obj') throw new Error('obj esperado');
+          let val;
+          [val, p] = parseValue(buf, p);
+          p0 = skipWs(buf, p);
+          const kw6 = LATIN.decode(buf.subarray(p0, p0 + 6));
+          if (kw6 === 'stream') {
+            let sp = p0 + 6;
+            if (buf[sp] === 0x0d) sp++;
+            if (buf[sp] === 0x0a) sp++;
+            const lenV = val.v.get('Length');
+            const length = lenV.t === 'num' ? lenV.v : await fetchSmallNumber(lenV.num);
+            const need = sp + length + 20;
+            if (need > buf.length && off !== undefined) {
+              if (win >= need) throw new Error('stream corto');
+              win = Math.max(win * 2, need + 64);
+              continue;
+            }
+            let q = sp + length;
+            const tail6 = LATIN.decode(buf.subarray(q, Math.min(q + 40, buf.length)));
+            const em = tail6.indexOf('endobj');
+            if (em < 0) { win = Math.max(win * 2, need + 4096); if (win > (1 << 26)) throw new Error('endobj no hallado'); continue; }
+            q += em + 6;
+            parsed = { kind: 'raw1', gen, value: val, streamStart: sp, streamLen: length, bytes: buf.slice(0, q) };
+          } else {
+            const kw = LATIN.decode(buf.subarray(p0, p0 + 6));
+            if (kw !== 'endobj') throw new Error('endobj esperado');
+            parsed = { kind: 'raw1', gen, value: val, bytes: buf.slice(0, p0 + 6) };
+          }
+          break;
+        } catch (err) {
+          if (win >= (1 << 26)) throw err;
+          win *= 2;
+        }
+      }
+      rec = parsed;
+    } else {
+      const holder = await loadObj(e.stm);
+      if (!holder.inflated) {
+        const d = holder.value.v;
+        let data = holder.bytes.slice(holder.streamStart, holder.streamStart + holder.streamLen);
+        const filter = d.get('Filter');
+        const fname = filter ? (filter.t === 'arr' ? filter.v[0]?.v : filter.v) : null;
+        if (fname === 'FlateDecode') data = await inflateFlate(data);
+        else if (fname) throw new Error('filtro ObjStm no soportado: ' + fname);
+        const dp = d.get('DecodeParms');
+        const dpd = dp ? (dp.t === 'arr' ? dp.v[0] : dp) : null;
+        if (dpd && dpd.t === 'dict') {
+          data = undoPredictor(data, dpd.v.get('Predictor')?.v || 1, dpd.v.get('Columns')?.v || 1);
+        }
+        const N = d.get('N').v, first = d.get('First').v;
+        const headTxt = LATIN.decode(data.subarray(0, first));
+        const nums = headTxt.trim().split(/\s+/).map(Number);
+        const items = [];
+        for (let i = 0; i < N; i++) items.push({ num: nums[2 * i], at: first + nums[2 * i + 1] });
+        for (let i = 0; i < N; i++) {
+          items[i].end = i + 1 < N ? first + nums[2 * (i + 1) + 1] : data.length;
+        }
+        holder.inflated = { data, items };
+      }
+      const it = holder.inflated.items[e.idx];
+      if (!it || it.num !== num) {
+        const alt = holder.inflated.items.find((x) => x.num === num);
+        if (!alt) throw new Error('objeto ' + num + ' no está en su ObjStm');
+        rec = { kind: 'raw2', gen: 0, body: holder.inflated.data.slice(alt.at, alt.end) };
+      } else {
+        rec = { kind: 'raw2', gen: 0, body: holder.inflated.data.slice(it.at, it.end) };
+      }
+      const [val] = parseValue(rec.body, 0);
+      rec.value = val;
+    }
+    objCache.set(num, rec);
+    return rec;
+  }
+
+  const parsedOf = async (ref) => (await loadObj(ref.num)).value;
+
+  /* --- descenso por el árbol de páginas con herencia --- */
+  const catalog = await parsedOf(rootRef);
+  let nodeRef = catalog.v.get('Pages');
+  if (!nodeRef || nodeRef.t !== 'ref') throw new Error('catálogo sin /Pages');
+  const inh = {};
+  let want = pageIndex;
+  let pageDict = null;
+  for (let depth = 0; depth < 64; depth++) {
+    const node = await parsedOf(nodeRef);
+    const d = node.v;
+    for (const k of ['Resources', 'MediaBox', 'CropBox', 'Rotate']) {
+      if (d.get(k) !== undefined) inh[k] = d.get(k);
+    }
+    const type = d.get('Type')?.v;
+    if (type === 'Page') { pageDict = d; break; }
+    const kids = d.get('Kids');
+    if (!kids || kids.t !== 'arr') throw new Error('nodo Pages sin Kids');
+    let next = null;
+    for (const kidRef of kids.v) {
+      const kid = await parsedOf(kidRef);
+      const cnt = kid.v.get('Type')?.v === 'Pages' ? (kid.v.get('Count')?.v ?? 0) : 1;
+      if (want < cnt) { next = kidRef; break; }
+      want -= cnt;
+    }
+    if (!next) throw new Error('índice de página fuera de rango');
+    nodeRef = next;
+  }
+  if (!pageDict) throw new Error('página no encontrada');
+
+  /* --- página final: campos propios + heredados, sin equipaje --- */
+  const finalPage = new Map();
+  finalPage.set('Type', { t: 'name', v: 'Page' });
+  const eff = (k) => pageDict.get(k) !== undefined ? pageDict.get(k) : inh[k];
+  const media = eff('MediaBox') || { t: 'arr', v: [0, 0, 612, 792].map((n) => ({ t: 'num', v: n })) };
+  finalPage.set('MediaBox', media);
+  if (eff('CropBox') !== undefined) finalPage.set('CropBox', eff('CropBox'));
+  if (eff('Rotate') !== undefined) finalPage.set('Rotate', eff('Rotate'));
+  if (eff('Resources') !== undefined) finalPage.set('Resources', eff('Resources'));
+  if (pageDict.get('Contents') !== undefined) finalPage.set('Contents', pageDict.get('Contents'));
+  if (pageDict.get('Group') !== undefined) finalPage.set('Group', pageDict.get('Group'));
+
+  /* --- clausura de referencias --- */
+  const seeds = [];
+  for (const v of finalPage.values()) refsOf(v, seeds);
+  const keep = new Set();
+  const queue = [...seeds];
+  let total = 0;
+  const CAP = Math.min(48 * 1024 * 1024, Math.max(4 * 1024 * 1024, size * 0.7));
+  while (queue.length) {
+    const num = queue.shift();
+    if (keep.has(num)) continue;
+    keep.add(num);
+    const rec = await loadObj(num);
+    total += rec.kind === 'raw1' ? rec.bytes.length : rec.body.length;
+    if (total > CAP) throw new Error('la página comparte demasiados recursos con el resto');
+    const refs = [];
+    refsOf(rec.value, refs);
+    for (const r of refs) if (!keep.has(r)) queue.push(r);
+  }
+
+  /* --- emisión --- */
+  const nums = [...keep].sort((a, b) => a - b);
+  const maxNum = nums.length ? nums[nums.length - 1] : 0;
+  const pagesNum = maxNum + 1, pageNum = maxNum + 2, catNum = maxNum + 3;
+  finalPage.set('Parent', { t: 'ref', num: pagesNum, gen: 0 });
+
+  const parts = [];
+  const offsets = new Map();
+  let cursor = 0;
+  const push = (u8OrStr) => {
+    const u8 = typeof u8OrStr === 'string' ? TE.encode(u8OrStr) : u8OrStr;
+    parts.push(u8);
+    cursor += u8.length;
+  };
+  push('%PDF-1.7\n%\xE2\xE3\xCF\xD3\n');
+  for (const num of nums) {
+    const rec = objCache.get(num);
+    offsets.set(num, { at: cursor, gen: rec.gen || 0 });
+    if (rec.kind === 'raw1') { push(rec.bytes); push('\n'); }
+    else { push(`${num} 0 obj\n`); push(rec.body); push('\nendobj\n'); }
+  }
+  offsets.set(pagesNum, { at: cursor, gen: 0 });
+  push(`${pagesNum} 0 obj\n<< /Type /Pages /Kids [ ${pageNum} 0 R ] /Count 1 >>\nendobj\n`);
+  offsets.set(pageNum, { at: cursor, gen: 0 });
+  push(`${pageNum} 0 obj\n${serialize({ t: 'dict', v: finalPage })}\nendobj\n`);
+  offsets.set(catNum, { at: cursor, gen: 0 });
+  push(`${catNum} 0 obj\n<< /Type /Catalog /Pages ${pagesNum} 0 R >>\nendobj\n`);
+
+  const xrefAt = cursor;
+  const all = [...offsets.keys()].sort((a, b) => a - b);
+  let xs2 = 'xref\n0 1\n0000000000 65535 f \n';
+  let i = 0;
+  while (i < all.length) {
+    let j = i;
+    while (j + 1 < all.length && all[j + 1] === all[j] + 1) j++;
+    xs2 += `${all[i]} ${j - i + 1}\n`;
+    for (let k = i; k <= j; k++) {
+      const o = offsets.get(all[k]);
+      xs2 += `${String(o.at).padStart(10, '0')} ${String(o.gen).padStart(5, '0')} n \n`;
+    }
+    i = j + 1;
+  }
+  push(xs2);
+  push(`trailer\n<< /Size ${catNum + 1} /Root ${catNum} 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`);
+
+  const out = new Uint8Array(cursor);
+  let at = 0;
+  for (const u8 of parts) { out.set(u8, at); at += u8.length; }
+  return out;
 }
 
 /* Carga por rangos: pdf.js pide trozos del archivo bajo demanda (file.slice)
@@ -916,7 +1450,7 @@ async function addFiles(fileList) {
       }
       const doc = await pdfjsLib.getDocument(opts).promise;
       const id = ++state.srcSeq;
-      state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map(), editedBytes: null });
+      state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map(), editedBytes: null, pageEdits: new Map(), editRev: 0 });
       for (let i = 0; i < doc.numPages; i++) {
         fresh.push({ uid: ++state.uidSeq, srcId: id, idx: i, crop: null });
       }
@@ -1749,6 +2283,10 @@ async function exportPdf() {
       await yieldUI();
     }
   };
+  const libMini = async (pe) => {
+    if (!pe.libDoc) pe.libDoc = PDFDocument.load(pe.bytes);
+    return pe.libDoc;
+  };
   const libDoc = async (srcId) => {
     let d = libDocs.get(srcId);
     if (!d) {
@@ -1786,16 +2324,28 @@ async function exportPdf() {
 
     for (let i = 0; i < total; i++) {
       const ref = state.pages[i];
+      const pe = state.sources.get(ref.srcId).pageEdits?.get(ref.idx);
 
       if (!ref.crop) {
+        if (pe) {
+          /* página editada: se injerta desde su mini-PDF */
+          await flushRun();
+          const md = await libMini(pe);
+          const [cp] = await out.copyPages(md, [0]);
+          if (ref.rot) cp.setRotation(PDFLib.degrees(rotNorm(cp.getRotation().angle + ref.rot)));
+          out.addPage(cp);
+          processed++;
+          await report(false);
+          continue;
+        }
         if (run && run.srcId === ref.srcId) { run.idxs.push(ref.idx); run.rots.push(ref.rot || 0); }
         else { await flushRun(); run = { srcId: ref.srcId, idxs: [ref.idx], rots: [ref.rot || 0] }; }
         continue;
       }
 
       await flushRun();
-      const sdoc = await libDoc(ref.srcId);
-      const spage = sdoc.getPage(ref.idx);
+      const sdoc = pe ? await libMini(pe) : await libDoc(ref.srcId);
+      const spage = sdoc.getPage(pe ? 0 : ref.idx);
       const rot = rotNorm(spage.getRotation().angle + (ref.rot || 0));
       const mb = spage.getMediaBox();
       const c = ref.crop;
@@ -1821,7 +2371,7 @@ async function exportPdf() {
         }
         drawEmbedded(pg, emb, rot, dx, dy, dw, dh);
       } else {
-        const [cp] = await out.copyPages(sdoc, [ref.idx]);
+        const [cp] = await out.copyPages(sdoc, [pe ? 0 : ref.idx]);
         cp.setMediaBox(rect.left, rect.bottom, cw, ch);
         cp.setCropBox(rect.left, rect.bottom, cw, ch);
         cp.setRotation(PDFLib.degrees(rot));
@@ -2091,7 +2641,7 @@ const ed = {
   space: false,
 };
 const eS = () => ed.fit * ed.zoom;
-const eKey = () => 'S' + ed.srcId;
+const eKey = () => 'S' + ed.srcId + ':' + ed.pageIdx + ':' + (ed.session || 0);
 
 /* --- cliente RPC del worker del motor --- */
 let engWorker = null, engSeq = 0;
@@ -2322,7 +2872,8 @@ async function enterEdit() {
   if (p.rot) { toast('Esta página tiene un giro pendiente. Gírala de vuelta antes de editar el contenido.', 'err'); return; }
   const src = state.sources.get(p.srcId);
 
-  ed.active = true; ed.srcId = p.srcId; ed.idx = p.idx; ed.uid = p.uid;
+  ed.active = true; ed.srcId = p.srcId; ed.pageIdx = p.idx; ed.uid = p.uid;
+  ed.session = (ed.session || 0) + 1;
   ed.selImg = null; ed.dirty = false; ed.pendingImg = null;
   ed.pw = 0; ed.ph = 0; ed.zoom = 1; ed.base = null; ed.space = false;
   document.body.classList.add('editing');
@@ -2337,9 +2888,29 @@ async function enterEdit() {
   eSetStatus('Cargando motor de edición…');
 
   await eRun(async () => {
-    const bytes = src.editedBytes
-      ? new Uint8Array(src.editedBytes)
-      : new Uint8Array(await src.file.arrayBuffer());
+    /* Página única: el motor recibe SOLO esta página (mini-PDF por rangos).
+       Si este PDF se le resiste al extractor, cae al documento completo. */
+    let bytes = null;
+    ed.mode = 'full';
+    const pe = src.pageEdits && src.pageEdits.get(p.idx);
+    if (pe) {
+      bytes = new Uint8Array(pe.bytes);
+      ed.mode = 'mini';
+    } else {
+      try {
+        const input = src.editedBytes ? new Blob([src.editedBytes]) : src.file;
+        bytes = await extractSinglePage(input, p.idx);
+        ed.mode = 'mini';
+      } catch (err) {
+        console.warn('extractor → camino completo:', err && err.message);
+      }
+    }
+    if (!bytes) {
+      bytes = src.editedBytes
+        ? new Uint8Array(src.editedBytes)
+        : new Uint8Array(await src.file.arrayBuffer());
+    }
+    ed.idx = ed.mode === 'mini' ? 0 : p.idx;
     await engine('open', { key: eKey(), bytes }, [bytes.buffer]);
     const info = await engine('pageInfo', { key: eKey(), idx: ed.idx });
     ed.pw = info.w; ed.ph = info.h;
@@ -2861,6 +3432,29 @@ function onEditClickLine(e) {
 }
 
 /* --- aplicar los cambios al documento del visor --- */
+/* Registra la edición de UNA página como mini-PDF propio. El documento del
+   visor no se toca (conserva la carga por rangos). */
+async function setPageEdit(srcId, idx, bytes) {
+  const src = state.sources.get(srcId);
+  if (!src.pageEdits) { src.pageEdits = new Map(); src.editRev = 0; }
+  const prev = src.pageEdits.get(idx);
+  const doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+  src.pageEdits.set(idx, { bytes, doc, rev: ++src.editRev });
+  if (prev) { try { prev.doc.destroy(); } catch { /* ya liberado */ } }
+  for (const k of [...src.pageCache.keys()]) {
+    if (k === idx || (typeof k === 'string' && k.startsWith('E' + idx + ':'))) src.pageCache.delete(k);
+  }
+  const pref = srcId + ':' + idx;
+  for (const k of [...bmpCache.keys()]) {
+    if (k === pref || k.startsWith(pref + ':')) {
+      const e = bmpCache.get(k);
+      try { e.bmp.close(); } catch { /* ya cerrado */ }
+      bmpCache.delete(k);
+    }
+  }
+  vlist.refresh();
+}
+
 async function reloadSourceAfterEdit(srcId) {
   const src = state.sources.get(srcId);
   const copy = new Uint8Array(src.editedBytes);
@@ -2900,12 +3494,16 @@ async function eFlipPage(dir) {
   hideTxEd();
   await eRun(async () => {
     if (ed.dirty) {
-      eSetStatus('Aplicando cambios al documento…');
+      eSetStatus('Aplicando cambios…');
       const r = await engine('save', { key: eKey() });
-      const src = state.sources.get(ed.srcId);
-      src.editedBytes = new Uint8Array(r.bytes);
-      await reloadSourceAfterEdit(ed.srcId);
-      toast('Edición aplicada al documento', 'ok');
+      if (ed.mode === 'mini') {
+        await setPageEdit(ed.srcId, ed.pageIdx, new Uint8Array(r.bytes));
+      } else {
+        const src = state.sources.get(ed.srcId);
+        src.editedBytes = new Uint8Array(r.bytes);
+        await reloadSourceAfterEdit(ed.srcId);
+      }
+      toast('Edición aplicada a la página', 'ok');
     }
   });
   state.sel = new Set([targetUid]);
@@ -2951,12 +3549,16 @@ async function eFlipPage(dir) {
 
   dom.eDone.addEventListener('click', () => eRun(async () => {
     if (ed.dirty) {
-      eSetStatus('Aplicando cambios al documento…');
+      eSetStatus('Aplicando cambios…');
       const r = await engine('save', { key: eKey() });
-      const src = state.sources.get(ed.srcId);
-      src.editedBytes = new Uint8Array(r.bytes);
-      await reloadSourceAfterEdit(ed.srcId);
-      toast('Edición aplicada al documento', 'ok');
+      if (ed.mode === 'mini') {
+        await setPageEdit(ed.srcId, ed.pageIdx, new Uint8Array(r.bytes));
+      } else {
+        const src = state.sources.get(ed.srcId);
+        src.editedBytes = new Uint8Array(r.bytes);
+        await reloadSourceAfterEdit(ed.srcId);
+      }
+      toast('Edición aplicada a la página', 'ok');
     }
     forceExitEdit();
   }));
@@ -3009,7 +3611,10 @@ function resetAll() {
   if (!confirm('Se vaciará todo el proyecto (los archivos originales de tu disco no se tocan). ¿Continuar?')) return;
   if (ed.active) forceExitEdit();
   if (engWorker) engine('closeAll').catch(() => { /* motor sin abrir */ });
-  for (const s of state.sources.values()) { try { s.doc.destroy(); } catch { /* ya liberado */ } }
+  for (const s of state.sources.values()) {
+    try { s.doc.destroy(); } catch { /* ya liberado */ }
+    if (s.pageEdits) for (const pe of s.pageEdits.values()) { try { pe.doc.destroy(); } catch { /* ya */ } }
+  }
   for (const e of bmpCache.values()) { try { e.bmp.close?.(); } catch { /* ya cerrado */ } }
   state.sources.clear();
   state.pages = [];

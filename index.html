@@ -876,6 +876,20 @@ function getPage(srcId, idx) {
   return pr;
 }
 
+/* Carga por rangos: pdf.js pide trozos del archivo bajo demanda (file.slice)
+   y NUNCA materializa el PDF completo en memoria. Clave en móviles. */
+const RANGE_MIN_BYTES = 12 * 1024 * 1024;
+
+function pdfRangeTransport(file) {
+  const t = new pdfjsLib.PDFDataRangeTransport(file.size, new Uint8Array(0));
+  t.requestDataRange = (begin, end) => {
+    file.slice(begin, end).arrayBuffer()
+      .then((buf) => t.onDataRange(begin, new Uint8Array(buf)))
+      .catch(() => { /* archivo ilegible: pdf.js reportará el fallo */ });
+  };
+  return t;
+}
+
 async function addFiles(fileList) {
   const files = [...fileList].filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
   if (!files.length) { toast('Elige archivos PDF', 'err'); return; }
@@ -886,12 +900,21 @@ async function addFiles(fileList) {
     try {
       // pdf.js recibe SU copia (el worker se la queda); nosotros guardamos
       // el File: los bytes para exportar se releen del disco bajo demanda.
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const doc = await pdfjsLib.getDocument({
-        data: bytes,
+      /* Grandes: por rangos (el worker no guarda el PDF entero).
+         Pequeños: copia transferida de una vez (menos idas y vueltas). */
+      const opts = {
         cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true,
         standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
-      }).promise;
+      };
+      if (f.size >= RANGE_MIN_BYTES) {
+        opts.range = pdfRangeTransport(f);
+        opts.disableAutoFetch = true;
+        opts.disableStream = true;
+      } else {
+        opts.data = new Uint8Array(await f.arrayBuffer());
+        opts.transferPdfData = true;
+      }
+      const doc = await pdfjsLib.getDocument(opts).promise;
       const id = ++state.srcSeq;
       state.sources.set(id, { id, name: f.name, file: f, doc, pages: doc.numPages, pageCache: new Map(), editedBytes: null });
       for (let i = 0; i < doc.numPages; i++) {
@@ -1055,6 +1078,18 @@ function pumpThumbs() {
     runThumbJob(job).finally(() => { thumbActive--; pumpThumbs(); });
   }
 }
+let docCleanT = 0;
+function scheduleDocClean() {
+  if (!matchMedia('(pointer:coarse)').matches) return;
+  clearTimeout(docCleanT);
+  docCleanT = setTimeout(() => {
+    if (thumbActive) return;
+    for (const s of state.sources.values()) {
+      if (s.doc) s.doc.cleanup().catch(() => { /* render en curso: otra vez será */ });
+    }
+  }, 800);
+}
+
 async function runThumbJob(job) {
   const p = pageByUid(job.uid);
   if (!p) { pendingThumbs.delete(job.key); return; }
@@ -1065,6 +1100,7 @@ async function runThumbJob(job) {
     catch { /* página irrecuperable: se deja el marcador */ }
   }
   pendingThumbs.delete(job.key);
+  scheduleDocClean();
   if (!bm) return;
   const row = vlist.rowByUid(job.uid);
   const pNow = pageByUid(job.uid);
@@ -1201,6 +1237,7 @@ const vlist = (() => {
 
 /* ---------- Visor principal ---------- */
 let mainToken = 0;
+let mainPrev = null; // última página del visor (para soltar su decodificación en táctil)
 let mainTask = null;
 let lastVis = null; // {w,h} en puntos visuales de la página actual SIN corte
 const mainOff = document.createElement('canvas'); // reutilizado entre renders
@@ -1229,6 +1266,10 @@ async function renderMain() {
   let page;
   try { page = await getPage(p.srcId, p.idx); } catch { return; }
   if (my !== mainToken) return;
+  if (matchMedia('(pointer:coarse)').matches && mainPrev && mainPrev.uid !== p.uid) {
+    try { mainPrev.page.cleanup(); } catch { /* en uso */ }
+  }
+  mainPrev = { uid: p.uid, page };
 
   const vp1 = page.getViewport({ scale: 1 });
   dims.set(bKey(p), { w: vp1.width, h: vp1.height });
@@ -3092,6 +3133,9 @@ function wire() {
     if (document.hidden) {
       for (const v of bmpCache.values()) { try { v.bmp.close(); } catch { /* ya cerrado */ } }
       bmpCache.clear();
+      for (const s of state.sources.values()) {
+        if (s.doc) s.doc.cleanup().catch(() => { /* ocupado */ });
+      }
     } else {
       vlist.refresh();
     }

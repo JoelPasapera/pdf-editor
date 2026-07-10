@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Guillotina — Procesador de PDF</title>
 <meta name="description" content="Edita el contenido, recorta, redimensiona a A4, elimina, reordena y une PDFs. Todo se procesa en tu navegador.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f5b301'/%3E%3Cpath d='M7 22 25 8' stroke='%231f2428' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -34,6 +34,7 @@
 }
 *{box-sizing:border-box}
 html,body{height:100%}
+@supports (height:100dvh){html,body{height:100dvh}} /* alto real en móvil: sin hueco por la barra del navegador */
 body{
   margin:0;
   font-family:var(--font-ui);
@@ -93,7 +94,7 @@ body.resizing{user-select:none;-webkit-user-select:none}
   display:grid;
   grid-template-columns:172px minmax(0,1fr) 296px;
 }
-@media (max-width:960px) and (min-width:701px){
+@media (min-width:701px) and (max-width:960px) and (min-height:501px){
   body{overflow:auto}
   .app{grid-template-columns:116px minmax(0,1fr);grid-template-rows:minmax(340px,60vh) auto}
   .tools{grid-column:1 / -1;border-left:none;border-top:1px solid var(--line);
@@ -104,36 +105,38 @@ body.resizing{user-select:none;-webkit-user-select:none}
 /* ---------- Teléfonos: visor a pantalla completa + cajones ---------- */
 .mbar{display:none}
 #backdrop{display:none}
-@media (max-width:700px){
+@media (max-width:700px), (max-height:500px){
+  :root{--mbarh:calc(52px + env(safe-area-inset-bottom, 0px))}
   body{overflow:hidden}
-  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);padding-bottom:52px}
-  .topbar{flex-wrap:wrap;gap:6px;padding:8px 10px}
+  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);padding-bottom:var(--mbarh)}
+  .topbar{flex-wrap:nowrap;gap:6px;padding:6px 8px;overflow-x:auto}
+  .plate h1{font-size:15px}
   .plate small{display:none}
-  .topbar .btn{padding:7px 10px;font-size:12px}
+  .topbar .btn{padding:7px 10px;font-size:12px;flex:0 0 auto;white-space:nowrap}
   .status{display:none}
-  .strip{position:fixed;left:0;top:0;bottom:52px;width:min(78vw,300px);z-index:40;
+  .strip{position:fixed;left:0;top:0;bottom:var(--mbarh);width:min(78vw,300px);z-index:40;
     transform:translateX(-105%);transition:transform .22s ease;
     border-right:1px solid var(--line);box-shadow:6px 0 24px rgba(0,0,0,.35)}
   .strip.open{transform:none}
-  .tools{position:fixed;right:0;top:0;bottom:52px;width:min(88vw,340px);z-index:40;
+  .tools{position:fixed;right:0;top:0;bottom:var(--mbarh);width:min(88vw,340px);z-index:40;
     transform:translateX(105%);transition:transform .22s ease;
     border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.35);overflow-y:auto}
   .tools.open{transform:none}
-  #backdrop{position:fixed;left:0;right:0;top:0;bottom:52px;background:rgba(15,18,16,.42);z-index:35}
+  #backdrop{position:fixed;left:0;right:0;top:0;bottom:var(--mbarh);background:rgba(15,18,16,.42);z-index:35}
   #backdrop[hidden]{display:none}
-  .mbar{display:flex;position:fixed;left:0;right:0;bottom:0;height:52px;z-index:45;
+  .mbar{display:flex;position:fixed;left:0;right:0;bottom:0;height:var(--mbarh);z-index:45;
+    padding-bottom:env(safe-area-inset-bottom, 0px);
     background:var(--panel);border-top:1px solid var(--line)}
   .mbtn{flex:1;border:none;background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
   .mbtn.on{color:var(--blade)}
   body.editing .mbar{display:none}
   body.editing .app{padding-bottom:0}
-  .navarr{top:auto;bottom:12px;transform:none;width:34px;height:50px;font-size:22px}
-  .navarr.prev{left:calc(50% - 46px)}
-  .navarr.next{right:auto;left:calc(50% + 12px)}
-  body.editing .navarr{top:50%;bottom:auto;transform:translateY(-50%)}
+  .navarr{top:auto;bottom:10px;transform:none;width:40px;height:46px;font-size:22px}
+  .navarr.prev{left:8px}
+  .navarr.next{left:auto;right:8px}
   body.editing .navarr.prev{left:8px}
   body.editing .navarr.next{left:auto;right:8px}
-  .zoomctl{right:8px;bottom:12px}
+  .zoomctl{right:8px;bottom:64px}
   .mat{padding:12px}
   .editbar{overflow-x:auto;flex-wrap:nowrap}
   .txed{max-width:calc(100vw - 12px)}
@@ -717,7 +720,7 @@ const CACHE_MAX = 260;                    // máx. ImageBitmaps en caché
 const UNDO_MAX = 40;
 const DIMS_CONC = 24;                     // concurrencia al medir páginas
 const EXPORT_CHUNK = 400;                 // páginas por llamada copyPages
-const MAIN_CAP_PX = 4096;                 // lado máx. del lienzo del visor
+const MAIN_CAP_PX = matchMedia('(pointer:coarse)').matches ? 2560 : 4096; // táctil: 4× menos memoria en zoom                 // lado máx. del lienzo del visor
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -1248,7 +1251,7 @@ async function renderMain() {
   const pad = 72;
   const os = Math.min(window.devicePixelRatio || 1, 2);
   const fit = clamp(Math.min((box.width - pad) / visW, (box.height - pad) / visH), 0.05, 4);
-  if (p.uid !== vw.uid) { vw.uid = p.uid; vw.zoom = 1; }
+  if (p.uid !== vw.uid) { vw.uid = p.uid; } // el zoom se conserva al cambiar de página
   vw.fitBase = fit; vw.visW = visW; vw.visH = visH;
   vw.zoom = clamp(vw.zoom, 0.25, Math.min(5, 12 / fit));
   const cssScale = fit * vw.zoom;
@@ -2848,6 +2851,7 @@ async function eFlipPage(dir) {
   }
   if (ed.dirty && !confirm('Hay cambios sin aplicar en esta página. ¿Aplicarlos y pasar de página?')) return;
   const targetUid = state.pages[t].uid;
+  const keepZoom = ed.zoom; // conservar el zoom al pasar de página
   hideTxEd();
   await eRun(async () => {
     if (ed.dirty) {
@@ -2866,6 +2870,9 @@ async function eFlipPage(dir) {
   vlist.scrollToUid(targetUid);
   statusSync();
   await enterEdit();
+  if (ed.active && Math.abs(keepZoom - ed.zoom) > 1e-3) {
+    eZoomAt(ed.vw / 2, ed.vh / 2, keepZoom / Math.max(ed.zoom, 1e-4));
+  }
 }
 
 /* --- cableado del modo edición --- */

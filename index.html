@@ -93,12 +93,62 @@ body.resizing{user-select:none;-webkit-user-select:none}
   display:grid;
   grid-template-columns:172px minmax(0,1fr) 296px;
 }
-@media (max-width:960px){
+@media (max-width:960px) and (min-width:701px){
   body{overflow:auto}
   .app{grid-template-columns:116px minmax(0,1fr);grid-template-rows:minmax(340px,60vh) auto}
   .tools{grid-column:1 / -1;border-left:none;border-top:1px solid var(--line);
          flex-direction:row;flex-wrap:wrap;align-items:flex-start}
   .tools section{flex:1 1 260px}
+}
+
+/* ---------- Teléfonos: visor a pantalla completa + cajones ---------- */
+.mbar{display:none}
+#backdrop{display:none}
+@media (max-width:700px){
+  body{overflow:hidden}
+  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);padding-bottom:52px}
+  .topbar{flex-wrap:wrap;gap:6px;padding:8px 10px}
+  .plate small{display:none}
+  .topbar .btn{padding:7px 10px;font-size:12px}
+  .status{display:none}
+  .strip{position:fixed;left:0;top:0;bottom:52px;width:min(78vw,300px);z-index:40;
+    transform:translateX(-105%);transition:transform .22s ease;
+    border-right:1px solid var(--line);box-shadow:6px 0 24px rgba(0,0,0,.35)}
+  .strip.open{transform:none}
+  .tools{position:fixed;right:0;top:0;bottom:52px;width:min(88vw,340px);z-index:40;
+    transform:translateX(105%);transition:transform .22s ease;
+    border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.35);overflow-y:auto}
+  .tools.open{transform:none}
+  #backdrop{position:fixed;left:0;right:0;top:0;bottom:52px;background:rgba(15,18,16,.42);z-index:35}
+  #backdrop[hidden]{display:none}
+  .mbar{display:flex;position:fixed;left:0;right:0;bottom:0;height:52px;z-index:45;
+    background:var(--panel);border-top:1px solid var(--line)}
+  .mbtn{flex:1;border:none;background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+  .mbtn.on{color:var(--blade)}
+  body.editing .mbar{display:none}
+  body.editing .app{padding-bottom:0}
+  .navarr{top:auto;bottom:12px;transform:none;width:34px;height:50px;font-size:22px}
+  .navarr.prev{left:calc(50% - 46px)}
+  .navarr.next{right:auto;left:calc(50% + 12px)}
+  body.editing .navarr{top:50%;bottom:auto;transform:translateY(-50%)}
+  body.editing .navarr.prev{left:8px}
+  body.editing .navarr.next{left:auto;right:8px}
+  .zoomctl{right:8px;bottom:12px}
+  .mat{padding:12px}
+  .editbar{overflow-x:auto;flex-wrap:nowrap}
+  .txed{max-width:calc(100vw - 12px)}
+  .txed select{max-width:140px}
+}
+
+/* Táctil: gestos propios en el tapete y zonas de agarre más generosas */
+.mat{touch-action:pan-x pan-y}
+.editwrap{touch-action:none}
+@media (pointer:coarse){
+  .hzone.n,.hzone.s{height:30px}
+  .hzone.w,.hzone.e{width:30px}
+  .hcorner{width:30px;height:30px}
+  .hzone.n::after,.hzone.s::after{width:54px;height:13px}
+  .hzone.w::after,.hzone.e::after{width:13px;height:54px}
 }
 
 /* ---------- Tira de miniaturas (lista virtual) ---------- */
@@ -523,7 +573,7 @@ body.editing .navarr.next{right:12px}
   </section>
 
   <!-- Herramientas -->
-  <aside class="tools" aria-label="Herramientas">
+  <aside class="tools" id="toolsPanel" aria-label="Herramientas">
 
     <section id="toolCrop">
       <h3 class="eyebrow">CORTE</h3>
@@ -595,6 +645,12 @@ body.editing .navarr.next{right:12px}
 
   </aside>
 </main>
+
+<div id="backdrop" hidden></div>
+<nav class="mbar" id="mbar" aria-label="Navegación móvil">
+  <button id="mbPages" class="mbtn" type="button">▤ Páginas</button>
+  <button id="mbTools" class="mbtn" type="button">✂ Herramientas</button>
+</nav>
 
 <!-- ======================= BARRA DE ESTADO ======================= -->
 <footer class="status">
@@ -701,6 +757,8 @@ const posOfUid = (uid) => { const p = uidPos.get(uid); return p === undefined ? 
 const $ = (s) => document.querySelector(s);
 const dom = {
   fileInput: $('#fileInput'), addBtn: $('#addBtn'), addBtn2: $('#addBtn2'),
+  toolsPanel: $('#toolsPanel'), backdrop: $('#backdrop'), mbar: $('#mbar'),
+  mbPages: $('#mbPages'), mbTools: $('#mbTools'),
   openBtn: $('#openBtn'), undoBtn: $('#undoBtn'), newBtn: $('#newBtn'),
   exportBtn: $('#exportBtn'), thumbList: $('#thumbList'),
   vSpacer: $('#vSpacer'), dropLine: $('#dropLine'),
@@ -2220,6 +2278,7 @@ async function enterEdit() {
   ed.selImg = null; ed.dirty = false; ed.pendingImg = null;
   ed.pw = 0; ed.ph = 0; ed.zoom = 1; ed.base = null; ed.space = false;
   document.body.classList.add('editing');
+  if (window.closeDrawers) window.closeDrawers();
   dom.editbar.hidden = false;
   dom.pagebox.hidden = true;
   dom.empty.classList.add('hidden');
@@ -2852,15 +2911,17 @@ async function eFlipPage(dir) {
 
   dom.eImgFile.addEventListener('change', async () => {
     const f = dom.eImgFile.files[0];
-    dom.eImgFile.value = '';
-    if (!f) { if (ed.tool === 'image') setTool('select'); return; }
+    if (!f) { dom.eImgFile.value = ''; if (ed.tool === 'image') setTool('select'); return; }
     try {
+      /* leer ANTES de vaciar el input: en móvil el orden inverso pierde el archivo */
       const bytes = new Uint8Array(await f.arrayBuffer());
+      dom.eImgFile.value = '';
       const bmp = await createImageBitmap(new Blob([bytes], { type: f.type }));
       ed.pendingImg = { bytes, w: bmp.width, h: bmp.height, name: f.name };
       bmp.close();
       eSetStatus(`Clic en la página donde colocar «${f.name}»`);
     } catch {
+      dom.eImgFile.value = '';
       toast('No se pudo leer la imagen (usa PNG o JPG)', 'err');
       setTool('select');
     }
@@ -2954,9 +3015,10 @@ function wire() {
   dom.addBtn.addEventListener('click', pick);
   dom.addBtn2.addEventListener('click', pick);
   dom.openBtn.addEventListener('click', pick);
-  dom.fileInput.addEventListener('change', () => {
-    addFiles(dom.fileInput.files);
-    dom.fileInput.value = '';
+  dom.fileInput.addEventListener('change', async () => {
+    /* En móvil, vaciar el input antes de terminar la lectura invalida los archivos */
+    const files = [...dom.fileInput.files];
+    try { await addFiles(files); } finally { dom.fileInput.value = ''; }
   });
 
   // Arrastrar y soltar archivos en toda la ventana
@@ -2997,6 +3059,74 @@ function wire() {
   dom.applyCrop.addEventListener('click', applyCrop);
   dom.rotLeft.addEventListener('click', () => doRotate(-1));
   dom.rotRight.addEventListener('click', () => doRotate(1));
+
+  /* ---------- Cajones móviles ---------- */
+  const stripEl = document.getElementById('thumbList');
+  let drawerOpen = null;
+  function drawerSync() {
+    stripEl.classList.toggle('open', drawerOpen === 'pages');
+    dom.toolsPanel.classList.toggle('open', drawerOpen === 'tools');
+    dom.backdrop.hidden = !drawerOpen;
+    dom.mbPages.classList.toggle('on', drawerOpen === 'pages');
+    dom.mbTools.classList.toggle('on', drawerOpen === 'tools');
+  }
+  window.closeDrawers = () => { drawerOpen = null; drawerSync(); };
+  const toggleDrawer = (w) => { drawerOpen = (drawerOpen === w ? null : w); drawerSync(); };
+  dom.mbPages.addEventListener('click', () => toggleDrawer('pages'));
+  dom.mbTools.addEventListener('click', () => toggleDrawer('tools'));
+  dom.backdrop.addEventListener('click', () => { if (drawerOpen) toggleDrawer(drawerOpen); });
+  stripEl.addEventListener('click', () => {
+    if (drawerOpen === 'pages' && matchMedia('(max-width:700px)').matches) {
+      setTimeout(window.closeDrawers, 160); // dejar ver la página elegida
+    }
+  });
+
+  /* ---------- Pellizco con dos dedos: zoom + paneo (visor y edición) ---------- */
+  let pz = null;
+  const tDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const tMid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  function pinchStart(e) {
+    if (e.touches.length !== 2) return;
+    e.preventDefault();
+    const m = tMid(e.touches);
+    if (ed.active && ed.pw) {
+      pz = { mode: 'edit', d0: tDist(e.touches), z0: ed.zoom, mPrev: m };
+    } else if (curPage()) {
+      pz = { mode: 'view', d0: tDist(e.touches), z0: (vw.gest ? vw.pend : vw.zoom), m0: m,
+             sl: dom.mat.scrollLeft, st: dom.mat.scrollTop };
+    }
+  }
+  function pinchMove(e) {
+    if (!pz || e.touches.length !== 2) return;
+    e.preventDefault();
+    const m = tMid(e.touches);
+    const k = tDist(e.touches) / Math.max(pz.d0, 1);
+    if (pz.mode === 'view') {
+      vPreviewZoom(pz.z0 * k, m.x, m.y);
+      dom.mat.scrollLeft = pz.sl - (m.x - pz.m0.x);
+      dom.mat.scrollTop = pz.st - (m.y - pz.m0.y);
+    } else {
+      const r = dom.editwrap.getBoundingClientRect();
+      eZoomAt(m.x - r.left, m.y - r.top, (pz.z0 * k) / Math.max(ed.zoom, 1e-4));
+      ed.panX -= (m.x - pz.mPrev.x) / eS();
+      ed.panY -= (m.y - pz.mPrev.y) / eS();
+      eClampPan();
+      ePreview();
+      eScheduleSettle();
+    }
+    pz.mPrev = m;
+  }
+  function pinchEnd(e) {
+    if (!pz || e.touches.length >= 2) return;
+    const was = pz; pz = null;
+    if (was.mode === 'view') vCommitZoom();
+  }
+  for (const el of [dom.mat, dom.editwrap]) {
+    el.addEventListener('touchstart', pinchStart, { passive: false });
+    el.addEventListener('touchmove', pinchMove, { passive: false });
+    el.addEventListener('touchend', pinchEnd);
+    el.addEventListener('touchcancel', pinchEnd);
+  }
   dom.clearCrop.addEventListener('click', clearCrop);
 
   // Corte: cuchillas arrastrables (tapete ⇄ panel)

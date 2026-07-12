@@ -1626,7 +1626,8 @@ function queueThumb(uid, key) {
 }
 function pumpThumbs() {
   if (rd.on) return; // modo lectura: la cola de miniaturas descansa
-  while (thumbActive < 2 && thumbJobs.length) {
+  const conc = matchMedia('(pointer:coarse)').matches ? 1 : 2; // táctil: una decodificación a la vez (pico de memoria a la mitad)
+  while (thumbActive < conc && thumbJobs.length) {
     const job = thumbJobs.shift();
     const row = vlist.rowByUid(job.uid);
     if (!row) { pendingThumbs.delete(job.key); continue; } // ya no es visible
